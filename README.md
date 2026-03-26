@@ -1,13 +1,15 @@
-# 📘 Credit Spread Finder - README
+# Credit Spread Finder
 
 **Purpose:** Find the 9 best options trades (credit spreads) from 500 stock tickers in minutes
 
-**What to know:** Which exact trades to place today  
-
-**What to do:** Execute high-probability credit spreads  
-
+**What to know:** Which exact trades to place today
+**What to do:** Execute high-probability credit spreads
 **What to feel:** Confident because math backs every trade
 
+> **Original concept and pipeline architecture by [Temple-Stuart](https://github.com/Temple-Stuart/temple-stuart-accounting).**
+> This implementation migrates the pipeline to the Tradier brokerage API and replaces GPT analysis with Claude AI.
+
+---
 
 ### What's in it for me?
 - Save 3 hours of manual searching daily
@@ -15,142 +17,198 @@
 - Never miss high-volatility opportunities
 - Stop losing on shitty scanner data
 
-# 🔎 Credit Spread Finder - PIPELINE
+---
 
-##  🛠 Build a Porftolio
+## Stack
 
-**Step 00A:** Download a CSV file from GitHub containing S&P 500 companies. Extract ticker symbols. Save 503 tickers to `data/sp500.json.` 
+| Layer | Tool |
+|---|---|
+| Brokerage / market data | [Tradier](https://tradier.com) |
+| News data | [Finnhub](https://finnhub.io) |
+| AI analysis | [Claude](https://anthropic.com) (Anthropic) |
+| Spread math | Black-Scholes (built-in) |
+
+---
+
+## Pipeline
+
+### Phase 1 — Build a Portfolio
+
+**Step 00A:** Download S&P 500 company list from GitHub. Extract ticker symbols. Save 503 tickers to `data/sp500.json`.
 
 ```bash
 python3 pipeline/00a_get_sp500.py
 ```
-<img width="569" height="140" alt="image" src="https://github.com/user-attachments/assets/33d41e93-10e8-4d47-ad09-8ccfd6022801" />
 
-
-**Step 00B:** Stream live bid/ask quotes from TastyTrade for S&P500 stocks. Filter by price ($30-400) and spread (<2%). Saves liquid stocks to `data/filter1_passed.json.`
+**Step 00B:** Stream live bid/ask quotes from Tradier for all S&P 500 stocks. Filter by price ($30–$400) and spread (<2%). Save liquid stocks to `data/filter1_passed.json`.
 
 ```bash
-python3 pipeline/00b_filter_price.py
+python3 pipeline/00b_filter_price_tradier.py
 ```
-<img width="566" height="224" alt="image" src="https://github.com/user-attachments/assets/021b8abe-f6ea-4241-a2c0-b80208b78a0d" />
 
-
-**Step 00C:** Stream options chains from TastyTrade for output of `Step 00B`. Filter by expiration (15-45 days) and strike count (20+ strikes). Saves stocks with tradeable options to `data/filter2_passed.json.`
+**Step 00C:** Stream options chains from Tradier for output of Step 00B. Filter by expiration (15–45 days) and strike count (20+ strikes). Save stocks with tradeable options to `data/filter2_passed.json`.
 
 ```bash
-python3 pipeline/00c_filter_options.py
+python3 pipeline/00c_filter_options_tradier.py
 ```
-<img width="568" height="222" alt="image" src="https://github.com/user-attachments/assets/73a77f06-85cd-4281-b75c-92b96d558bd1" />
 
-
-**Step 00D:** Stream ATM option strikes from TastyTrade chains. Streams IV data for strikes. Filter by IV range 15-80%. Saves 66 stocks to `data/filter3_passed.json.`
+**Step 00D:** Stream ATM option strikes and IV data from Tradier. Filter by IV range 15–80%. Save to `data/filter3_passed.json`.
 
 ```bash
-python3 pipeline/00d_filter_iv.py
+python3 pipeline/00d_filter_iv_tradier.py
 ```
-<img width="568" height="223" alt="image" src="https://github.com/user-attachments/assets/b6a68d8d-bde6-4e09-9e34-e7452ce578c7" />
 
-
-**Step 00E:** Load stocks from `Step 00D`.  Score by IV (40 pts), Strik Count (30 pts), expirations (20 pts), spread tightness (10 pts).  Rank by total score.  Select top 22 tickers.  Save to `data/stocks.py`
+**Step 00E:** Score each stock by IV (40 pts), strike count (30 pts), expirations (20 pts), spread tightness (10 pts). Rank and select top 22 tickers. Save to `data/stocks.json`.
 
 ```bash
-python3 pipeline/00e_select_22.py
+python3 pipeline/00e_select_22_tradier.py
 ```
-<img width="570" height="284" alt="image" src="https://github.com/user-attachments/assets/471ae162-dd29-4327-a056-2c411870f10c" />
 
-
-**Step 00F:** Fetch 3 days of news linked to output from `Step 00E` from Finnhub.io.  Collect up to 10 artilces per stock with headlines.  Save article count and headlines `data/finnhub_news.json.`
+**Step 00F:** Fetch 3 days of news from Finnhub for the top 22. Collect up to 10 articles per stock with headlines. Save to `data/finnhub_news.json`.
 
 ```bash
-python3 pipeline/00f_get_news.py
+python3 pipeline/00f_get_news_tradier.py
 ```
-<img width="649" height="851" alt="image" src="https://github.com/user-attachments/assets/c504a233-6113-4815-8791-395433722c4a" />
 
-
-## ⚙️ Build Credit Spreads
-
-
-**Step 01:** Stream bid/ask quotes from TastyTrade for output from `Step 00E`. Save mid-price, spread, and timestamp to `data/stock_prices.json.`
+**Step 00G:** Send news headlines to Claude AI. Remove any stock with earnings in the next 45 days, FDA decisions, M&A rumors, major lawsuits, or severe negative sentiment. Save filtered list back to `data/stocks.json`.
 
 ```bash
-python3 pipeline/01_get_stock_prices.py
+python3 pipeline/00g_claude_sentiment_filter.py
 ```
-<img width="567" height="569" alt="image" src="https://github.com/user-attachments/assets/a75dca0b-77f4-4197-bfcf-91bc818f5912" />
 
+---
 
+### Phase 2 — Build Credit Spreads
 
-**Step 02:** Stream option chain from TastyTrade for output from `Step 01`. Filters 0-45 DTE, 70-130% strikes. Save expiration dates, strikes, call/put symbols, and bid/ask to `data/chains.json.`
-
+**Step 01:** Stream real-time bid/ask quotes from Tradier for the filtered stock list. Save mid-price, spread, and timestamp to `data/stock_prices.json`.
 
 ```bash
-python3 pipeline/02_get_chains.py
+python3 pipeline/01_get_prices_tradier.py
 ```
-<img width="570" height="521" alt="image" src="https://github.com/user-attachments/assets/43d670f4-4ca7-409c-843d-8170ceb23726" />
 
-
-**Step 03:** Loads output from `Step 02` (strikes). For each strike checks call/put, bid/ask. Filters by mid >= $0.30 and spread <10%. Saves liquid strikes per expiration to `data/liquid_chains.json.`
+**Step 02:** Stream full options chains from Tradier. Filter 0–45 DTE, 70–130% of stock price strikes. Save expiration dates, strikes, call/put symbols, and bid/ask to `data/chains.json`.
 
 ```bash
-python3 pipeline/03_check_liquidity.py
+python3 pipeline/02_get_chains_tradier.py
 ```
-<img width="568" height="1004" alt="image" src="https://github.com/user-attachments/assets/ae27addb-0b3f-42bb-ab5f-6b2628e89e40" />
 
-
-**Step 04:** Loads outpput from `Step 02`. Extracts all call/put symbols with bids > 0. Streams Greeks (IV/delta/theta/gamma/vega) from TastyTrade in 300-symbol batches for 8 seconds each. Embeds Greeks into chain structure at exact strike locations. Saves to `data/chains_with_greeks.json.`
+**Step 03:** Check liquidity for every strike — filter by mid-price ≥ $0.30 and spread <10%. Save liquid strikes per expiration to `data/liquid_chains.json`.
 
 ```bash
-python3 pipeline/04_get_greeks.py
+python3 pipeline/03_check_liquidity_tradier.py
 ```
-<img width="571" height="539" alt="image" src="https://github.com/user-attachments/assets/332ae009-62c6-4613-b2df-8171016ebefc" />
 
-
-**Step 5** Loads output from `Step 4` and `Step 01`. For each ticker/expiration (7-45 DTE), pairs strikes into Bull Put and Bear Call spreads. Filters short delta 15-35% (OTM probability). Calculates credit (short bid - long ask), max loss, ROI. Uses Black-Scholes formula with strike-specific IV to calculate PoP. Filters ROI 5-50%, PoP ≥60%. Saves spreads to `data/spreads.json.`
+**Step 04:** Fetch Greeks (IV/delta/theta/gamma/vega) from Tradier in batches. Embed Greeks into the chain structure at exact strike locations. Save to `data/chains_with_greeks.json`.
 
 ```bash
-python3 pipeline/05_calculate_spreads.py
+python3 pipeline/04_get_greeks_tradier.py
 ```
-<img width="569" height="997" alt="image" src="https://github.com/user-attachments/assets/98eeafd1-f0cd-49f4-a433-b2879f1bda7e" />
 
-
-**Step 6** Loads output from `Step 5`. Calculates score = (ROI × PoP) / 100 for each spread. Sorts by score descending. Keeps ONLY the highest-scoring spread per ticker (22 total). Categorizes as ENTER (PoP ≥70% + ROI ≥20%), WATCH (PoP ≥60% + ROI ≥30%), or SKIP. Saves to `ranked_spreads.json.`
+**Step 05:** Pair strikes into Bull Put and Bear Call spreads. Filter short delta 15–35% (OTM probability). Calculate credit, max loss, and ROI. Use Black-Scholes with strike-specific IV to calculate PoP. Filter ROI 5–50%, PoP ≥60%. Save to `data/spreads.json`.
 
 ```bash
-python3 pipeline/06_rank_spreads.py
+python3 pipeline/05_calculate_spreads_tradier.py
 ```
-<img width="562" height="510" alt="image" src="https://github.com/user-attachments/assets/91484ae5-8e1e-42e7-b735-6241aa5bf516" />
 
-
-**Step 7** Loads output from `Step 06`. Selects top 9 by rank. Adds sector mapping (XLK/XLF/XLV etc). Adds edge_reason from `Step 00E`. Formats into report table with rank, ticker, type, strikes, DTE, ROI, PoP, credit, max loss. Saves to `report_table.json.`
+**Step 06:** Score each spread as `(ROI × PoP) / 100`. Keep only the highest-scoring spread per ticker (22 total). Categorize as ENTER (PoP ≥70% + ROI ≥20%), WATCH (PoP ≥60% + ROI ≥30%), or SKIP. Save to `data/ranked_spreads.json`.
 
 ```bash
-python3 pipeline/07_build_report.py
+python3 pipeline/06_rank_spreads_tradier.py
 ```
-<img width="579" height="330" alt="image" src="https://github.com/user-attachments/assets/ef8928b3-2626-4e7f-84b6-e153fbcfb035" />
 
-
-**Step 8** Loads output from `Step 07`, `Step 01`, and `Step 0F`. For each trade, calculates buffer from strike, extracts 3 news headlines, and 3 headline summaries. Sends to GPT-4 with 5W1H analysis framework (Who/What/When/Where/Why/How). GPT assigns heat score 1-10 (risk from news/catalysts), analyzes catalyst timing, recommends Trade/Wait/Skip. Saves to `top9_analysis.json.`
+**Step 07:** Select top 9 by rank. Add sector mapping (XLK/XLF/XLV etc). Format into report table with rank, ticker, type, strikes, DTE, ROI, PoP, credit, max loss. Save to `data/report_table.json`.
 
 ```bash
-python3 pipeline/08_gpt_analysis.py
+python3 pipeline/07_build_report_tradier.py
 ```
-<img width="738" height="959" alt="image" src="https://github.com/user-attachments/assets/daf72a25-7746-48fa-a1ea-f2e6d4cba457" />
 
-
-**Step 9**  Loads output from `Step 08`. Uses regex to parse GPT's structured output. Extracts ticker, type, strikes, DTE, ROI, PoP, heat score (1-10), and recommendation (Trade/Wait/Skip) for each trade. Prints formatted table showing all 9 trades. Saves to CSV file with timestamp for Excel.
+**Step 08:** Send each trade to Claude AI with 3 news headlines. Claude applies 5W1H analysis (Who/What/When/Where/Why/How), assigns a heat score 1–10 (news/catalyst risk), and recommends **Trade / Wait / Skip**. Save to `data/top9_analysis.json`.
 
 ```bash
-python3 pipeline/09_format_trades.py
+python3 pipeline/08_claude_analysis.py
 ```
-<img width="998" height="602" alt="image" src="https://github.com/user-attachments/assets/e39eaa48-7725-4443-93cb-01941329e74d" />
 
-
-## 🤖 Automate 
-
-**Step 10** Automate the pipeline
+**Step 09:** Parse Claude's structured output. Extract ticker, type, strikes, DTE, ROI, PoP, heat score, and recommendation. Print formatted table. Save timestamped CSV for Excel.
 
 ```bash
-python3 pipeline/10_run_pipeline.py
+python3 pipeline/09_format_trades_tradier.py
 ```
 
+---
 
+### Phase 3 — Execute & Monitor
 
+**Step 10:** Run the full pipeline end-to-end (Steps 00A → 09), then auto-launch Steps 11 and 12.
+
+```bash
+python3 pipeline/10_run_pipeline_tradier.py
+```
+
+**Step 11:** Human approval gate. Presents each Claude-recommended **TRADE** with full details (strikes, credit, max loss, ROI, PoP, heat score). Prompts for contract count, previews the order via Tradier, requires explicit `yes` confirmation before placing any live order. Saves placed trades to `data/open_positions.json`.
+
+```bash
+python3 pipeline/11_place_trades.py
+```
+
+**Step 12:** Position monitor. Runs every 5 minutes during market hours (9:35–15:55 ET). Checks every open position against three exit rules:
+- **Profit target** — close when spread value drops to 60% of credit received (40% profit locked in)
+- **Stop loss** — close when spread costs 2× the credit to close
+- **Time stop** — close when DTE reaches 21 days
+
+Places closing orders automatically via Tradier. Logs closed trades to `data/closed_positions.json`.
+
+```bash
+python3 pipeline/12_position_monitor.py
+```
+
+---
+
+## Quick Start
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/rydindirty/<repo-name>.git
+cd <repo-name>
+
+# 2. Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# 3. Install dependencies
+pip install requests openai anthropic finnhub-python
+
+# 4. Configure credentials
+cp config.py.example config.py
+# Edit config.py with your Tradier token, Finnhub key, and Anthropic key
+
+# 5. Run the full pipeline
+python3 pipeline/10_run_pipeline_tradier.py
+```
+
+---
+
+## Data Flow
+
+```
+S&P 500 (503)
+  → Price filter       → ~150 liquid stocks
+  → Options filter     → ~100 with tradeable chains
+  → IV filter          → ~60 in 15–80% IV range
+  → Score & select     → Top 22 tickers
+  → Sentiment filter   → Risky stocks removed
+  → Spread builder     → Thousands of spread candidates
+  → Liquidity check    → Only liquid strikes
+  → Greeks             → Delta-filtered OTM spreads
+  → ROI/PoP filter     → High-probability trades only
+  → Rank & top 9       → Best spread per ticker
+  → Claude analysis    → Heat score + recommendation
+  → Human approval     → Live orders placed
+  → Position monitor   → Auto-exit at targets
+```
+
+---
+
+## Credit
+
+Original pipeline concept and architecture by **[Temple-Stuart](https://github.com/Temple-Stuart/temple-stuart-accounting)**.
+This fork migrates market data and trade execution to the Tradier API and replaces GPT-4 analysis with Claude AI.

@@ -5,6 +5,7 @@ config.py
 # Data files (regenerated each run)
 data/*.json
 data/*.csv
+data/stocks.py
 
 # Python
 __pycache__/
@@ -16,3 +17,18 @@ venv/
 
 # Mac
 .DS_Store
+
+# Unrelated / local-only folders
+claude-seo/
+pipeline_ORIGINAL/
+
+# Artifact / junk files
+cat
+ls
+gpt_response.txt
+top9_detailed_20251003_1408.csv
+MIGRATION_LOG.md
+CLAUDE.md
+
+# Claude Code internals
+.claude/
