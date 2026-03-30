@@ -1,21 +1,27 @@
 """
 Rank Spreads: One spread per ticker only.
-Applies macro regime score multipliers and adjusted entry thresholds
-loaded from data/macro_regime.json (written by step 00H).
+Applies two independent score multipliers and regime-adjusted entry thresholds.
 
-Scoring:
-  base_score = (ROI × PoP) / 100
-  adjusted_score = base_score × regime_multiplier
+Final score formula:
+  base_score    = (ROI × PoP) / 100
+  adjusted_score = base_score × regime_multiplier × tech_multiplier
 
-  Multipliers by regime:
-    Goldilocks  — Bull Put ×1.15 | Bear Call ×0.90
-    Neutral     — both ×1.00  (no adjustment)
-    Slowing     — Bull Put ×0.90 | Bear Call ×1.10
-    Contraction — Bull Put ×0.80 | Bear Call ×1.20
-    Stagflation — Bull Put ×0.80 | Bear Call ×1.20
+1. Macro regime multiplier (from data/macro_regime.json, step 00H):
+     Goldilocks  — Bull Put ×1.15 | Bear Call ×0.90
+     Neutral     — both ×1.00
+     Slowing     — Bull Put ×0.90 | Bear Call ×1.10
+     Contraction — Bull Put ×0.80 | Bear Call ×1.20
+     Stagflation — Bull Put ×0.80 | Bear Call ×1.20
 
-Entry thresholds also shift per regime; see 00h_macro_regime.py for details.
-Falls back to Neutral (×1.00, standard thresholds) if file is absent.
+2. Technical indicator multiplier (from data/technicals.json, step 01B):
+     strong_bullish — Bull Put ×1.15 | Bear Call ×0.85
+     bullish        — Bull Put ×1.08 | Bear Call ×0.93
+     neutral        — both ×1.00
+     bearish        — Bull Put ×0.92 | Bear Call ×1.08
+     strong_bearish — Bull Put ×0.85 | Bear Call ×1.15
+
+Entry thresholds shift per regime; see 00h_macro_regime.py for details.
+Both files fall back gracefully (×1.00, standard thresholds) if absent.
 """
 import json
 import os
@@ -23,6 +29,15 @@ import sys
 from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# ── Default tech multipliers — used when technicals.json is absent ─────────
+_TECH_MULTIPLIERS = {
+    "strong_bullish": {"Bull Put": 1.15, "Bear Call": 0.85},
+    "bullish":        {"Bull Put": 1.08, "Bear Call": 0.93},
+    "neutral":        {"Bull Put": 1.00, "Bear Call": 1.00},
+    "bearish":        {"Bull Put": 0.92, "Bear Call": 1.08},
+    "strong_bearish": {"Bull Put": 0.85, "Bear Call": 1.15},
+}
 
 # ── Neutral defaults — used when macro_regime.json is absent ───────────────
 _NEUTRAL = {
@@ -60,6 +75,22 @@ def load_macro_regime():
         return _NEUTRAL
 
 
+def load_technicals():
+    """
+    Load per-ticker technical signals from technicals.json.
+    Returns a dict: {ticker: signal_str}.
+    Falls back to empty dict (neutral for all) if file is absent.
+    """
+    try:
+        with open("data/technicals.json", "r") as f:
+            data = json.load(f)
+        return {t: v.get("signal", "neutral")
+                for t, v in data.get("technicals", {}).items()}
+    except FileNotFoundError:
+        print("   ⚠️  technicals.json not found — no tech adjustment applied")
+        return {}
+
+
 def rank_spreads():
     print("=" * 60)
     print("STEP 6: Rank Spreads (1 per ticker)")
@@ -69,7 +100,8 @@ def rank_spreads():
         data = json.load(f)
     spreads = data["spreads"]
 
-    regime = load_macro_regime()
+    regime     = load_macro_regime()
+    tech_map   = load_technicals()
 
     print(f"\n🌍 Macro Regime: {regime['regime_label']}")
     if regime["preferred_type"]:
@@ -79,6 +111,7 @@ def rank_spreads():
     print(f"   Entry thresholds: PoP ≥ {regime['enter_pop']}% | ROI ≥ {regime['enter_roi']}%")
     if regime["regime_note"]:
         print(f"   {regime['regime_note']}")
+    print(f"\n📊 Technicals loaded for {len(tech_map)} tickers")
 
     print(f"\n🏆 Ranking {len(spreads)} spreads...")
 
@@ -86,14 +119,20 @@ def rank_spreads():
         # Base score
         base_score = (spread["roi"] * spread["pop"]) / 100
 
-        # Regime multiplier by spread type
-        if spread["type"] == "Bull Put":
-            multiplier = regime["bull_put_multiplier"]
-        else:
-            multiplier = regime["bear_call_multiplier"]
+        spread_type = spread["type"]
 
-        spread["score"]             = round(base_score * multiplier, 1)
-        spread["regime_multiplier"] = multiplier
+        # Regime multiplier
+        regime_mult = (regime["bull_put_multiplier"] if spread_type == "Bull Put"
+                       else regime["bear_call_multiplier"])
+
+        # Technical multiplier — look up this ticker's signal
+        signal = tech_map.get(spread["ticker"], "neutral")
+        tech_mult = _TECH_MULTIPLIERS.get(signal, _TECH_MULTIPLIERS["neutral"])[spread_type]
+
+        spread["score"]             = round(base_score * regime_mult * tech_mult, 1)
+        spread["regime_multiplier"] = regime_mult
+        spread["tech_signal"]       = signal
+        spread["tech_multiplier"]   = tech_mult
 
         # Regime-adjusted ENTER / WATCH thresholds
         if spread["pop"] >= regime["enter_pop"] and spread["roi"] >= regime["enter_roi"]:
@@ -145,11 +184,16 @@ def rank_spreads():
 
     print(f"\n🎯 Top 9 Spreads:")
     for spread in unique_spreads[:9]:
-        mult = spread.get("regime_multiplier", 1.0)
-        mult_note = f" ×{mult:.2f}" if mult != 1.0 else ""
+        r_mult = spread.get("regime_multiplier", 1.0)
+        t_mult = spread.get("tech_multiplier", 1.0)
+        signal = spread.get("tech_signal", "neutral")
+        adj_note = ""
+        if r_mult != 1.0 or t_mult != 1.0:
+            adj_note = f" (regime×{r_mult:.2f} × tech×{t_mult:.2f})"
         print(f"   #{spread['rank']}: {spread['ticker']} {spread['type']} "
-              f"${spread['short_strike']:.0f}/${spread['long_strike']:.0f}")
-        print(f"        Score: {spread['score']}{mult_note} | "
+              f"${spread['short_strike']:.0f}/${spread['long_strike']:.0f}  "
+              f"[{signal}]")
+        print(f"        Score: {spread['score']}{adj_note} | "
               f"ROI: {spread['roi']}% | PoP: {spread['pop']}%")
 
     print("\n✅ Step 6 complete: ranked_spreads.json")
