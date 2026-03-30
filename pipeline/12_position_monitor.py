@@ -5,7 +5,9 @@ positions against three exit rules:
   1. Profit target  — close when spread value drops to 60% of
                       credit received (40% profit locked in)
   2. Stop loss      — close when spread costs 2x the credit to close
-  3. Time stop      — close when DTE reaches 21 days or less
+  3. Time stop      — hard close when DTE < 21 (past deadline)
+                      on DTE = 21: hold through the day; after 3:30 PM ET
+                      close only if spread is unfavorable (above credit)
 Sends a clear terminal alert and places the closing order
 automatically via Tradier.
 """
@@ -233,15 +235,18 @@ def check_positions():
             remaining.append(pos)
             continue
 
-        # ── Rule 3: Time stop ──────────────────────────────────
-        if dte <= 21:
-            print(f"  ⏰ TIME STOP triggered — {dte} DTE reached")
+        # ── Rule 3: Hard time stop (DTE < 21) ─────────────────
+        if dte < 21:
+            print(f"  ⏰ TIME STOP triggered — {dte} DTE (past deadline)")
+            close_val = get_spread_value(
+                pos["short_symbol"], pos["long_symbol"])
+            if close_val is None:
+                print(f"  ⚠️  Could not get quote for time stop — skipping")
+                remaining.append(pos)
+                continue
             try:
-                close_val = get_spread_value(
-                    pos["short_symbol"], pos["long_symbol"])
-                close_val = close_val or None
-                response  = place_closing_order(pos, close_val)
-                profit    = log_closed_trade(
+                response = place_closing_order(pos, close_val)
+                profit   = log_closed_trade(
                     pos, "time_stop", close_val, response)
                 print(f"  ✅ Closed at ${close_val:.2f} | "
                       f"P&L: ${profit:.2f}")
@@ -249,6 +254,45 @@ def check_positions():
                 print(f"  ❌ Close failed: {e}")
                 remaining.append(pos)
             continue
+
+        # ── Rule 3b: 21 DTE — end-of-day price action check ───
+        # Hold through the 21st day. After 3:30 PM ET, close only
+        # if spread is unfavorable (above credit received). If
+        # favorable, let profit/stop rules below handle it.
+        if dte == 21:
+            now = datetime.now()
+            is_eod = now.hour > 15 or (now.hour == 15 and now.minute >= 30)
+            if is_eod:
+                close_val = get_spread_value(
+                    pos["short_symbol"], pos["long_symbol"])
+                if close_val is None:
+                    print(f"  ⚠️  21 DTE EOD: no quote — holding")
+                    remaining.append(pos)
+                    continue
+                eod_pct = (credit - close_val) / credit * 100
+                print(f"  ⏰ 21 DTE END-OF-DAY | "
+                      f"Spread: ${close_val:.2f} | P&L: {eod_pct:.1f}%")
+                if close_val > credit:
+                    print(f"  📉 Unfavorable — spread above credit "
+                          f"(${credit:.2f}). Closing to limit loss.")
+                    try:
+                        response = place_closing_order(pos, close_val)
+                        profit   = log_closed_trade(
+                            pos, "time_stop_eod", close_val, response)
+                        print(f"  ✅ Closed at ${close_val:.2f} | "
+                              f"P&L: ${profit:.2f}")
+                    except Exception as e:
+                        print(f"  ❌ Close failed: {e}")
+                        remaining.append(pos)
+                    continue
+                else:
+                    print(f"  📈 Favorable — spread at/below credit "
+                          f"(${credit:.2f}). Holding for profit target.")
+                    # fall through to profit/stop checks below
+            else:
+                print(f"  📅 21 DTE — holding through end of day "
+                      f"(EOD check activates after 3:30 PM)")
+                # fall through to profit/stop checks below
 
         # ── Get current spread value ───────────────────────────
         current_value = get_spread_value(
@@ -361,7 +405,8 @@ def run_monitor(interval_minutes=5):
     print(f"   Exit rules:")
     print(f"     Profit target: 40% of max credit")
     print(f"     Stop loss:     2x credit received")
-    print(f"     Time stop:     21 DTE")
+    print(f"     Time stop:     hard close at DTE < 21")
+    print(f"                    DTE = 21: EOD check after 3:30 PM")
     print("=" * 60)
     print("\nPress Ctrl+C to stop\n")
 
