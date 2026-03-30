@@ -91,6 +91,22 @@ def load_technicals():
         return {}
 
 
+def load_peer_zscores():
+    """
+    Load per-ticker peer multipliers from peer_zscores.json.
+    Returns a dict: {ticker: peer_multiplier}.
+    Falls back to empty dict (×1.00 for all) if file is absent.
+    """
+    try:
+        with open("data/peer_zscores.json", "r") as f:
+            data = json.load(f)
+        return {t: v.get("peer_multiplier", 1.0)
+                for t, v in data.get("peer_zscores", {}).items()}
+    except FileNotFoundError:
+        print("   ⚠️  peer_zscores.json not found — no peer adjustment applied")
+        return {}
+
+
 def rank_spreads():
     print("=" * 60)
     print("STEP 6: Rank Spreads (1 per ticker)")
@@ -102,6 +118,7 @@ def rank_spreads():
 
     regime     = load_macro_regime()
     tech_map   = load_technicals()
+    peer_map   = load_peer_zscores()
 
     print(f"\n🌍 Macro Regime: {regime['regime_label']}")
     if regime["preferred_type"]:
@@ -111,7 +128,8 @@ def rank_spreads():
     print(f"   Entry thresholds: PoP ≥ {regime['enter_pop']}% | ROI ≥ {regime['enter_roi']}%")
     if regime["regime_note"]:
         print(f"   {regime['regime_note']}")
-    print(f"\n📊 Technicals loaded for {len(tech_map)} tickers")
+    print(f"\n📊 Technicals: {len(tech_map)} tickers | "
+          f"Peer z-scores: {len(peer_map)} tickers")
 
     print(f"\n🏆 Ranking {len(spreads)} spreads...")
 
@@ -125,14 +143,18 @@ def rank_spreads():
         regime_mult = (regime["bull_put_multiplier"] if spread_type == "Bull Put"
                        else regime["bear_call_multiplier"])
 
-        # Technical multiplier — look up this ticker's signal
-        signal = tech_map.get(spread["ticker"], "neutral")
+        # Technical multiplier
+        signal    = tech_map.get(spread["ticker"], "neutral")
         tech_mult = _TECH_MULTIPLIERS.get(signal, _TECH_MULTIPLIERS["neutral"])[spread_type]
 
-        spread["score"]             = round(base_score * regime_mult * tech_mult, 1)
+        # Peer z-score multiplier (IV elevation vs sector peers)
+        peer_mult = peer_map.get(spread["ticker"], 1.0)
+
+        spread["score"]             = round(base_score * regime_mult * tech_mult * peer_mult, 1)
         spread["regime_multiplier"] = regime_mult
         spread["tech_signal"]       = signal
         spread["tech_multiplier"]   = tech_mult
+        spread["peer_multiplier"]   = peer_mult
 
         # Regime-adjusted ENTER / WATCH thresholds
         if spread["pop"] >= regime["enter_pop"] and spread["roi"] >= regime["enter_roi"]:
@@ -185,11 +207,14 @@ def rank_spreads():
     print(f"\n🎯 Top 9 Spreads:")
     for spread in unique_spreads[:9]:
         r_mult = spread.get("regime_multiplier", 1.0)
-        t_mult = spread.get("tech_multiplier", 1.0)
+        t_mult = spread.get("tech_multiplier",   1.0)
+        p_mult = spread.get("peer_multiplier",   1.0)
         signal = spread.get("tech_signal", "neutral")
-        adj_note = ""
-        if r_mult != 1.0 or t_mult != 1.0:
-            adj_note = f" (regime×{r_mult:.2f} × tech×{t_mult:.2f})"
+        parts  = []
+        if r_mult != 1.0: parts.append(f"regime×{r_mult:.2f}")
+        if t_mult != 1.0: parts.append(f"tech×{t_mult:.2f}")
+        if p_mult != 1.0: parts.append(f"peer×{p_mult:.2f}")
+        adj_note = f" ({' × '.join(parts)})" if parts else ""
         print(f"   #{spread['rank']}: {spread['ticker']} {spread['type']} "
               f"${spread['short_strike']:.0f}/${spread['long_strike']:.0f}  "
               f"[{signal}]")

@@ -38,6 +38,12 @@ def load_comprehensive_data():
     except FileNotFoundError:
         data["regime"] = {}
 
+    try:
+        with open("data/peer_zscores.json", "r") as f:
+            data["peers"] = json.load(f).get("peer_zscores", {})
+    except FileNotFoundError:
+        data["peers"] = {}
+
     # Enrich each trade with current price and buffer percentage
     for trade in data["trades"]:
         ticker = trade["ticker"]
@@ -125,6 +131,16 @@ TRADES WITH NEWS:
         ticker = trade["ticker"]
         dte = trade.get("dte", "N/A")
 
+        # Build peer context line
+        peer_data   = data.get("peers", {}).get(ticker, {})
+        sector      = peer_data.get("sector", "Unknown")
+        iv_z        = peer_data.get("iv_zscore")
+        ret_z       = peer_data.get("return_zscore")
+        peer_peers  = peer_data.get("peers_in_universe", [])
+        iv_z_str    = f"{iv_z:+.2f}" if iv_z is not None else "n/a"
+        ret_z_str   = f"{ret_z:+.2f}" if ret_z is not None else "n/a"
+        peer_str    = ", ".join(peer_peers) if peer_peers else "none in universe"
+
         prompt += f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TRADE #{i}: {ticker} {trade['type']} {trade['legs']}
@@ -132,6 +148,8 @@ TRADE #{i}: {ticker} {trade['type']} {trade['legs']}
 METRICS:
 - Current: ${current:.2f} | Short Strike: ${trade['short_strike']:.0f} | Buffer: {buffer:.1f}%
 - DTE: {dte} | ROI: {roi:.1f}% | PoP: {pop:.1f}% | Score: {score:.1f}
+- Sector: {sector} | IV vs peers: z={iv_z_str} | 20d return vs peers: z={ret_z_str}
+- Sector peers in today's universe: {peer_str}
 
 NEWS (last 3 days):
 """

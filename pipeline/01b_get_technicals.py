@@ -243,11 +243,13 @@ def main():
             # Not enough history — neutral fallback
             print(f"   {ticker:<6} ⚠️  Insufficient history — neutral fallback")
             results[ticker] = {
-                "signal":        "neutral",
-                "signal_score":  0,
-                "score_breakdown": {},
-                "indicators":    {},
-                "fallback":      True
+                "signal":           "neutral",
+                "signal_score":     0,
+                "score_breakdown":  {},
+                "current_price":    None,
+                "price_return_20d": None,
+                "indicators":       {},
+                "fallback":         True
             }
             neutral_count += 1
             time.sleep(0.1)
@@ -292,14 +294,18 @@ def main():
                 "upper": bb_u, "middle": bb_m, "lower": bb_l, "pct_b": bb_pct
             }
 
+        ret_20d = (round((closes[-1] / closes[-21] - 1) * 100, 2)
+                   if len(closes) >= 21 else None)
+
         results[ticker] = {
-            "signal":          signal,
-            "signal_score":    score,
-            "score_breakdown": breakdown,
-            "current_price":   current_price,
-            "history_days":    len(closes),
-            "indicators":      indicators,
-            "fallback":        False
+            "signal":            signal,
+            "signal_score":      score,
+            "score_breakdown":   breakdown,
+            "current_price":     current_price,
+            "price_return_20d":  ret_20d,
+            "history_days":      len(closes),
+            "indicators":        indicators,
+            "fallback":          False
         }
 
         time.sleep(0.1)   # light rate-limit buffer
