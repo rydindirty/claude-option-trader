@@ -16,7 +16,7 @@ if not ANTHROPIC_API_KEY:
     sys.exit(1)
 
 def load_comprehensive_data():
-    # Load trades, prices, and news for analysis
+    # Load trades, prices, news, and macro regime for analysis
     data = {}
 
     with open("data/report_table.json", "r") as f:
@@ -31,6 +31,12 @@ def load_comprehensive_data():
             data["news"] = news["news_data"]
     except:
         data["news"] = {}
+
+    try:
+        with open("data/macro_regime.json", "r") as f:
+            data["regime"] = json.load(f)
+    except FileNotFoundError:
+        data["regime"] = {}
 
     # Enrich each trade with current price and buffer percentage
     for trade in data["trades"]:
@@ -53,12 +59,55 @@ def load_comprehensive_data():
     return data
 
 
+def build_regime_block(regime):
+    """Build the MACRO REGIME section for the Claude prompt."""
+    if not regime:
+        return ""
+
+    label     = regime.get("regime_label", "Neutral")
+    note      = regime.get("regime_note", "")
+    pref_type = regime.get("preferred_spread_type")
+    indicators = regime.get("indicators", {})
+
+    # Build a one-line indicator summary
+    parts = []
+    if "vix" in indicators:
+        v = indicators["vix"]
+        parts.append(f"VIX {v['value']:.1f} ({v.get('status', '')})")
+    if "yield_curve" in indicators:
+        v = indicators["yield_curve"]
+        parts.append(f"Yield curve {v['value']:+.2f}% ({v.get('status', '')})")
+    if "cpi_yoy" in indicators:
+        v = indicators["cpi_yoy"]
+        parts.append(f"CPI YoY {v['value']:.1f}% ({v.get('status', '')})")
+    if "gdp_growth" in indicators:
+        v = indicators["gdp_growth"]
+        parts.append(f"GDP {v['value']:.1f}% ({v.get('status', '')})")
+
+    ind_line = " | ".join(parts) if parts else "No macro data available"
+    pref_line = (f"Regime prefers {pref_type} spreads." if pref_type
+                 else "No directional spread preference this regime.")
+
+    return f"""
+MACRO REGIME: {label.upper()}
+{note}
+Indicators: {ind_line}
+{pref_line}
+A Bull Put in a Contraction/Stagflation regime carries extra downside tail risk.
+A Bear Call in a Goldilocks regime fights upward drift — require extra buffer.
+Factor the macro regime into your RECOMMENDATION for each trade.
+
+"""
+
+
 def create_analysis_prompt(data):
     # Build the structured prompt with trade metrics and news headlines
+    regime_block = build_regime_block(data.get("regime", {}))
+
     prompt = f"""Analyze 9 credit spreads with STRUCTURED NEWS ANALYSIS and HEAT SCORES.
 
 Date: {datetime.now().strftime('%Y-%m-%d')}
-
+{regime_block}
 HEAT SCORE (1-10):
 1-3 = Low risk (no catalysts, stable news)
 4-6 = Medium risk (moderate news activity)
