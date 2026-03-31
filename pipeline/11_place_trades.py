@@ -60,16 +60,22 @@ def load_data():
                         pass
                     break
 
-            # Find recommendation line starting with TRADE/WAIT/SKIP
+            # Find recommendation line — handles both formats:
+            # Direct:  "TRADE ..." / "WAIT ..." / "SKIP ..."
+            # Labeled: "RECOMMENDATION: TRADE ..." (Claude's typical output)
             for line in sec_lines:
                 clean = line.strip().replace("*", "").strip()
-                if clean.startswith("TRADE"):
+                # Normalize "RECOMMENDATION: TRADE" → just check the value after the colon
+                check = clean
+                if clean.upper().startswith("RECOMMENDATION:"):
+                    check = clean.split(":", 1)[1].strip()
+                if check.upper().startswith("TRADE"):
                     recommendations[ticker] = "TRADE"
                     break
-                elif clean.startswith("WAIT"):
+                elif check.upper().startswith("WAIT"):
                     recommendations[ticker] = "WAIT"
                     break
-                elif clean.startswith("SKIP"):
+                elif check.upper().startswith("SKIP"):
                     recommendations[ticker] = "SKIP"
                     break
 
