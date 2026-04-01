@@ -11,7 +11,6 @@ positions against three exit rules:
 Sends a clear terminal alert and places the closing order
 automatically via Tradier.
 """
-import json
 import os
 import sys
 import time
@@ -20,6 +19,7 @@ from datetime import datetime, date
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import TRADIER_TOKEN, TRADIER_ENV, get_tradier_session, TRADIER_BASE_URL, TRADIER_HEADERS, TRADIER_ACCOUNT_ID
+import db
 
 # ── Tradier config ─────────────────────────────────────────────
 # BASE_URL and HEADERS are now imported from config
@@ -44,18 +44,13 @@ def is_market_hours():
 
 
 def load_positions():
-    """Load open positions from data/open_positions.json."""
-    try:
-        with open("data/open_positions.json", "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
+    """Load open positions from data/trades.db."""
+    return db.load_open_positions()
 
 
 def save_positions(positions):
-    """Save updated positions list back to disk."""
-    with open("data/open_positions.json", "w") as f:
-        json.dump(positions, f, indent=2)
+    """No-op: positions are closed in-place via close_trade(); no bulk save needed."""
+    pass
 
 
 def get_spread_value(short_symbol, long_symbol):
@@ -165,33 +160,21 @@ def place_closing_order(position, current_value=None):
     return r.json()
 
 def log_closed_trade(position, close_reason, close_value, order_response):
-    """Append closed trade details to data/closed_positions.json."""
+    """Mark position closed in data/trades.db and return total P&L."""
     credit    = position["credit_received"]
     contracts = position["contracts"]
     profit    = round((credit - close_value) * contracts * 100, 2)
     profit_pct = round((credit - close_value) / credit * 100, 1)
 
-    record = {
-        **position,
-        "closed_at":      datetime.now().isoformat(),
-        "close_reason":   close_reason,
-        "close_value":    close_value,
-        "profit_per_contract": round((credit - close_value) * 100, 2),
-        "total_profit":   profit,
-        "profit_pct":     profit_pct,
-        "close_order_id": order_response.get("order", {}).get("id", "unknown")
-    }
-
-    try:
-        with open("data/closed_positions.json", "r") as f:
-            closed = json.load(f)
-    except FileNotFoundError:
-        closed = []
-
-    closed.append(record)
-
-    with open("data/closed_positions.json", "w") as f:
-        json.dump(closed, f, indent=2)
+    db.close_trade(
+        trade_id            = position["id"],
+        close_reason        = close_reason,
+        close_value         = close_value,
+        profit_per_contract = round((credit - close_value) * 100, 2),
+        total_profit        = profit,
+        profit_pct          = profit_pct,
+        close_order_id      = order_response.get("order", {}).get("id", "unknown"),
+    )
 
     return profit
 
