@@ -273,15 +273,17 @@ def main():
         short_strike, long_strike = parse_strikes(trade["legs"])
         credit = float(trade["net_credit"].replace("$", ""))
         max_loss = float(trade["max_loss"].replace("$", ""))
-        width = short_strike - long_strike
+        width = abs(short_strike - long_strike)
+        is_bear_call = "Bear Call" in trade.get("type", "")
+        opt_label = "Call" if is_bear_call else "Put"
 
         print("=" * 70)
         print(f"  TRADE #{trade['rank']}: {trade['ticker']} {trade['type']}")
         print("=" * 70)
         print(f"  Sell: {trade['ticker']} {trade['exp_date']} "
-              f"${short_strike:.0f} Put @ ${credit:.2f} credit")
+              f"${short_strike:.0f} {opt_label} @ ${credit:.2f} credit")
         print(f"  Buy:  {trade['ticker']} {trade['exp_date']} "
-              f"${long_strike:.0f} Put  (protection)")
+              f"${long_strike:.0f} {opt_label}  (protection)")
         print(f"  ─────────────────────────────────────────────")
         print(f"  Net Credit:  ${credit:.2f} per contract ($"
               f"{credit*100:.0f} total)")
