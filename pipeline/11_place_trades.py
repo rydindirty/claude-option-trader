@@ -13,6 +13,7 @@ from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import TRADIER_TOKEN, TRADIER_ENV, get_tradier_session, TRADIER_BASE_URL, TRADIER_HEADERS, TRADIER_ACCOUNT_ID
+import db
 
 # ── Tradier config ────────────────────────────────────────────
 # BASE_URL and HEADERS are now imported from config
@@ -206,12 +207,12 @@ def place_order(trade, contracts):
 
 def save_placed_trade(trade, contracts, order_response):
     """
-    Append placed trade to data/open_positions.json for the
-    position monitor to track.
+    Insert placed trade into data/trades.db for the position monitor to track.
     """
     short_strike, long_strike = parse_strikes(trade["legs"])
-    credit = float(trade["net_credit"].replace("$", ""))
+    credit   = float(trade["net_credit"].replace("$", ""))
     max_loss = float(trade["max_loss"].replace("$", ""))
+    opt_type = "call" if "Bear Call" in trade.get("type", "") else "put"
 
     position = {
         "ticker":            trade["ticker"],
@@ -226,31 +227,18 @@ def save_placed_trade(trade, contracts, order_response):
         "contracts":         contracts,
         "short_symbol":      build_option_symbol(
                                  trade["ticker"], trade["exp_date"],
-                                 "call" if "Bear Call" in trade.get("type", "") else "put",
-                                 short_strike),
+                                 opt_type, short_strike),
         "long_symbol":       build_option_symbol(
                                  trade["ticker"], trade["exp_date"],
-                                 "call" if "Bear Call" in trade.get("type", "") else "put",
-                                 long_strike),
+                                 opt_type, long_strike),
         "tradier_order_id":  order_response.get("order", {}).get("id", "unknown"),
         "opened_at":         datetime.now().isoformat(),
-        "profit_target_pct": 0.40,   # close at 40% of max profit
-        "stop_loss_pct":     2.00    # close if spread costs 2x credit to close
+        "profit_target_pct": 0.40,
+        "stop_loss_pct":     2.00,
     }
 
-    # Load existing positions or start fresh
-    try:
-        with open("data/open_positions.json", "r") as f:
-            positions = json.load(f)
-    except FileNotFoundError:
-        positions = []
-
-    positions.append(position)
-
-    with open("data/open_positions.json", "w") as f:
-        json.dump(positions, f, indent=2)
-
-    print(f"   📝 Logged to data/open_positions.json")
+    row_id = db.insert_open_trade(position)
+    print(f"   📝 Logged to data/trades.db (row id {row_id})")
 
 
 # ── Main approval loop ────────────────────────────────────────
@@ -388,7 +376,7 @@ def main():
     print(f"  Placed:  {len(placed)} trade(s): {', '.join(placed) or 'none'}")
     print(f"  Skipped: {len(skipped)} trade(s): {', '.join(skipped) or 'none'}")
     if placed:
-        print(f"\n  ✅ Open positions saved to data/open_positions.json")
+        print(f"\n  ✅ Open positions logged to data/trades.db")
         print(f"  🔍 Position monitor will track these for 40% profit target")
     print()
 
