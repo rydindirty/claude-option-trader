@@ -42,7 +42,7 @@ def extract_greeks_from_chains():
                         greeks = strike.get("greeks") or {}
                     if greeks:
                         strike["call_greeks"] = {
-                            "iv":    round(float(greeks.get("smv_vol") or 0), 4),
+                            "iv":    round(float(greeks.get("iv") or 0), 4),
                             "delta": round(float(greeks.get("delta") or 0), 4),
                             "gamma": round(float(greeks.get("gamma") or 0), 6),
                             "theta": round(float(greeks.get("theta") or 0), 4),
@@ -58,7 +58,7 @@ def extract_greeks_from_chains():
                         greeks = strike.get("greeks") or {}
                     if greeks:
                         strike["put_greeks"] = {
-                            "iv":    round(float(greeks.get("smv_vol") or 0), 4),
+                            "iv":    round(float(greeks.get("iv") or 0), 4),
                             "delta": round(float(greeks.get("delta") or 0), 4),
                             "gamma": round(float(greeks.get("gamma") or 0), 6),
                             "theta": round(float(greeks.get("theta") or 0), 4),
