@@ -213,8 +213,8 @@ def check_positions():
         # ── Minimum hold time — don't exit within 30 min of entry ──
         opened_at = datetime.fromisoformat(pos.get("opened_at", "2000-01-01"))
         minutes_held = (datetime.now() - opened_at).total_seconds() / 60
-        if minutes_held < 30:
-            print(f"  ⏳ Hold period — position is only {minutes_held:.0f} min old (min 30)")
+        if minutes_held < 10:
+            print(f"  ⏳ Hold period — position is only {minutes_held:.0f} min old (min 10)")
             remaining.append(pos)
             continue
 
