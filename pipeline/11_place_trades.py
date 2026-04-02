@@ -46,10 +46,10 @@ def fetch_buying_power():
         return None, None
 
 
-def suggest_contracts(max_loss_per_contract, buying_power, risk_pct=0.05):
+def suggest_contracts(max_loss_per_contract, buying_power, risk_pct=0.60):
     """
     Suggest a number of contracts using at most risk_pct of buying power
-    per trade (default 5%).  Returns at least 1.
+    per trade (default 60%).  Returns at least 1.
     """
     if not buying_power or buying_power <= 0:
         return 1
@@ -299,7 +299,7 @@ def main():
         print(f"   Option Buying Power: ${buying_power:,.2f}")
         if total_equity:
             print(f"   Total Equity:        ${total_equity:,.2f}")
-        print(f"   Risk per trade (5%): ${buying_power * 0.05:,.2f}")
+        print(f"   Risk per trade (60%): ${buying_power * 0.60:,.2f}")
     else:
         print(f"\n⚠️  Buying power unavailable — enter contracts manually")
 
@@ -358,7 +358,7 @@ def main():
         # Suggest contract count based on buying power (5% risk per trade)
         suggested = suggest_contracts(max_loss, buying_power)
         if buying_power:
-            print(f"  Suggested contracts (5% of ${buying_power:,.0f} BP): {suggested}")
+            print(f"  Suggested contracts (60% of ${buying_power:,.0f} BP): {suggested}")
 
         # Ask how many contracts
         while True:

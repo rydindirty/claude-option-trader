@@ -398,7 +398,7 @@ def check_positions():
 _peak_profit: dict[int, float] = {}
 # Trend tracking: last N spread values per trade id (newest last)
 _spread_history: dict[int, list] = {}
-_TREND_WINDOW = 3          # consecutive rising checks needed to trigger
+_TREND_WINDOW = 10         # consecutive rising checks needed to trigger
 _TRAIL_TRIGGER_PCT = 25.0  # profit must have hit this % before trailing
 _TRAIL_DROP_PCT   = 10.0   # close if profit drops this many points from peak
 
