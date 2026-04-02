@@ -16,6 +16,7 @@ import sys
 import time
 import requests
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import TRADIER_TOKEN, TRADIER_ENV, get_tradier_session, TRADIER_BASE_URL, TRADIER_HEADERS, TRADIER_ACCOUNT_ID
@@ -32,14 +33,16 @@ MARKET_CLOSE_HOUR = 15
 MARKET_CLOSE_MIN  = 55   # 5 min before close
 
 
+_ET = ZoneInfo("America/New_York")
+
+
 def is_market_hours():
     """Return True if current ET time is within market hours."""
-    now = datetime.now()
-    # Note: adjust if your system clock is not in ET
+    now = datetime.now(_ET)
     open_time  = now.replace(hour=MARKET_OPEN_HOUR,
-                              minute=MARKET_OPEN_MIN, second=0)
+                              minute=MARKET_OPEN_MIN, second=0, microsecond=0)
     close_time = now.replace(hour=MARKET_CLOSE_HOUR,
-                              minute=MARKET_CLOSE_MIN, second=0)
+                              minute=MARKET_CLOSE_MIN, second=0, microsecond=0)
     return open_time <= now <= close_time
 
 
@@ -210,7 +213,7 @@ def check_positions():
               f"{pos['long_strike']:.0f} "
               f"| Credit: ${credit:.2f} | DTE: {dte}")
 
-        # ── Minimum hold time — don't exit within 30 min of entry ──
+        # ── Minimum hold time — don't exit within 10 min of entry ──
         opened_at = datetime.fromisoformat(pos.get("opened_at", "2000-01-01"))
         minutes_held = (datetime.now() - opened_at).total_seconds() / 60
         if minutes_held < 10:
@@ -243,7 +246,7 @@ def check_positions():
         # if spread is unfavorable (above credit received). If
         # favorable, let profit/stop rules below handle it.
         if dte == 21:
-            now = datetime.now()
+            now = datetime.now(_ET)
             is_eod = now.hour > 15 or (now.hour == 15 and now.minute >= 30)
             if is_eod:
                 close_val = get_spread_value(
@@ -290,6 +293,34 @@ def check_positions():
         print(f"  Current spread value: ${current_value:.2f} | "
               f"P&L: {profit_pct:.1f}% of max profit")
 
+        trade_id = pos["id"]
+
+        # ── Update peak profit tracker ─────────────────────────
+        prev_peak = _peak_profit.get(trade_id, 0.0)
+        if profit_pct > prev_peak:
+            _peak_profit[trade_id] = profit_pct
+        peak = _peak_profit[trade_id]
+
+        # ── Fluid Rule A: Trailing profit stop ─────────────────
+        # If profit peaked above _TRAIL_TRIGGER_PCT and has since
+        # fallen _TRAIL_DROP_PCT points below that peak, close now.
+        if peak >= _TRAIL_TRIGGER_PCT:
+            trail_threshold = peak - _TRAIL_DROP_PCT
+            if profit_pct < trail_threshold:
+                print(f"  📉 TRAILING STOP — peaked at {peak:.1f}%, "
+                      f"now {profit_pct:.1f}% "
+                      f"(dropped {peak - profit_pct:.1f} pts from peak)")
+                try:
+                    response = place_closing_order(pos, current_value)
+                    profit   = log_closed_trade(
+                        pos, "trailing_stop", current_value, response)
+                    print(f"  ✅ Closed at ${current_value:.2f} | "
+                          f"P&L: ${profit:.2f}")
+                except Exception as e:
+                    print(f"  ❌ Close failed: {e}")
+                    remaining.append(pos)
+                continue
+
         # ── Rule 1: Profit target (40%) ────────────────────────
         target = credit * (1 - pos["profit_target_pct"])
         if current_value <= target:
@@ -335,6 +366,13 @@ def check_positions():
         print(f"\n  📊 Closed {closed_count} position(s) this check")
 
 
+# ── In-memory state for fluid stops (reset each monitor session) ──────────────
+# Trailing profit: tracks peak profit % seen so far per trade id
+_peak_profit: dict[int, float] = {}
+_TRAIL_TRIGGER_PCT = 25.0  # profit must have hit this % before trailing
+_TRAIL_DROP_PCT   = 10.0   # close if profit drops this many points from peak
+
+
 LOCK_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "data", "monitor.pid")
 
@@ -371,20 +409,24 @@ def release_lock():
         pass
 
 
-def run_monitor(interval_minutes=5):
+def run_monitor(interval_minutes=1):
     """
     Run the monitor loop continuously during market hours.
     Checks every interval_minutes minutes.
     """
     acquire_lock()
 
+    now_et = datetime.now(_ET)
+    open_positions = load_positions()
     print("=" * 60)
     print("🔍 POSITION MONITOR STARTED")
     print(f"   PID: {os.getpid()}")
-    print(f"   Checking every {interval_minutes} minutes")
+    print(f"   Current ET time: {now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"   Checking every {interval_minutes} minute(s)")
     print(f"   Market hours: "
           f"{MARKET_OPEN_HOUR}:{MARKET_OPEN_MIN:02d} - "
           f"{MARKET_CLOSE_HOUR}:{MARKET_CLOSE_MIN:02d} ET")
+    print(f"   Open positions in DB: {len(open_positions)}")
     print(f"   Exit rules:")
     print(f"     Profit target: 40% of max credit")
     print(f"     Stop loss:     2x credit received")
@@ -422,4 +464,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--once":
         check_positions()
     else:
-        run_monitor(interval_minutes=5)
+        run_monitor(interval_minutes=1)
