@@ -297,10 +297,8 @@ def check_positions():
         trade_id = pos["id"]
 
         # ── Update peak profit tracker ─────────────────────────
-        prev_peak = _peak_profit.get(trade_id, 0.0)
-        if profit_pct > prev_peak:
-            _peak_profit[trade_id] = profit_pct
-        peak = _peak_profit[trade_id]
+        peak = max(profit_pct, _peak_profit.get(trade_id, 0.0))
+        _peak_profit[trade_id] = peak
 
         # ── Fluid Rule A: Trailing profit stop ─────────────────
         # If profit peaked above _TRAIL_TRIGGER_PCT and has since
