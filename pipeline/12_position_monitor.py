@@ -14,6 +14,7 @@ automatically via Tradier.
 import os
 import sys
 import time
+import traceback
 import requests
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
@@ -451,6 +452,7 @@ def run_monitor(interval_minutes=1):
                 break
             except Exception as e:
                 print(f"❌ Monitor error: {e}")
+                traceback.print_exc()
                 print("   Retrying in 60 seconds...")
                 time.sleep(60)
     finally:
