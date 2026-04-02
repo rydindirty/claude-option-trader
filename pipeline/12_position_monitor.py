@@ -301,13 +301,6 @@ def check_positions():
             _peak_profit[trade_id] = profit_pct
         peak = _peak_profit[trade_id]
 
-        # ── Update consecutive-loss counter ────────────────────
-        if current_value > credit:
-            _consecutive_loss_checks[trade_id] = _consecutive_loss_checks.get(trade_id, 0) + 1
-        else:
-            _consecutive_loss_checks[trade_id] = 0   # back to even or profit — reset
-        loss_streak = _consecutive_loss_checks.get(trade_id, 0)
-
         # ── Fluid Rule A: Trailing profit stop ─────────────────
         # If profit peaked above _TRAIL_TRIGGER_PCT and has since
         # fallen _TRAIL_DROP_PCT points below that peak, close now.
@@ -327,26 +320,6 @@ def check_positions():
                     print(f"  ❌ Close failed: {e}")
                     remaining.append(pos)
                 continue
-
-        # ── Fluid Rule B: Sustained-loss stop ──────────────────
-        # If the spread has been above credit (in a loss) for
-        # _TREND_WINDOW consecutive checks with no recovery, close.
-        # Resets to 0 any time the spread drops back to/below credit.
-        if loss_streak >= _TREND_WINDOW:
-            loss_pct = abs(profit_pct)
-            print(f"  📈 SUSTAINED LOSS STOP — in loss for "
-                  f"{loss_streak} consecutive checks "
-                  f"({loss_pct:.1f}% loss). Closing.")
-            try:
-                response = place_closing_order(pos, current_value)
-                profit   = log_closed_trade(
-                    pos, "trend_stop", current_value, response)
-                print(f"  ✅ Closed at ${current_value:.2f} | "
-                      f"P&L: ${profit:.2f}")
-            except Exception as e:
-                print(f"  ❌ Close failed: {e}")
-                remaining.append(pos)
-            continue
 
         # ── Rule 1: Profit target (40%) ────────────────────────
         target = credit * (1 - pos["profit_target_pct"])
@@ -396,11 +369,6 @@ def check_positions():
 # ── In-memory state for fluid stops (reset each monitor session) ──────────────
 # Trailing profit: tracks peak profit % seen so far per trade id
 _peak_profit: dict[int, float] = {}
-# Trend stop: count of consecutive checks where spread is above credit
-# (position is in a loss). Resets to 0 the moment the spread drops back
-# to or below credit.
-_consecutive_loss_checks: dict[int, int] = {}
-_TREND_WINDOW = 10         # consecutive in-loss checks needed to trigger
 _TRAIL_TRIGGER_PCT = 25.0  # profit must have hit this % before trailing
 _TRAIL_DROP_PCT   = 10.0   # close if profit drops this many points from peak
 
