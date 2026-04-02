@@ -301,11 +301,15 @@ def check_positions():
             _peak_profit[trade_id] = profit_pct
         peak = _peak_profit[trade_id]
 
-        # ── Update spread value history ────────────────────────
-        hist = _spread_history.setdefault(trade_id, [])
-        hist.append(current_value)
-        if len(hist) > _TREND_WINDOW + 1:
-            hist.pop(0)
+        # ── Update consecutive-rising counter ──────────────────
+        last_val = _last_spread_value.get(trade_id)
+        if last_val is not None:
+            if current_value > last_val:
+                _consecutive_rises[trade_id] = _consecutive_rises.get(trade_id, 0) + 1
+            else:
+                _consecutive_rises[trade_id] = 0   # flat or improving — reset
+        _last_spread_value[trade_id] = current_value
+        streak = _consecutive_rises.get(trade_id, 0)
 
         # ── Fluid Rule A: Trailing profit stop ─────────────────
         # If profit peaked above _TRAIL_TRIGGER_PCT and has since
@@ -328,15 +332,15 @@ def check_positions():
                 continue
 
         # ── Fluid Rule B: Trend-based early stop ───────────────
-        # If spread has risen (losing) on _TREND_WINDOW consecutive
-        # checks AND we're already in loss territory (spread > credit),
-        # close early rather than waiting for the 2x hard stop.
-        if (len(hist) >= _TREND_WINDOW
-                and all(hist[i] < hist[i + 1] for i in range(len(hist) - _TREND_WINDOW, len(hist) - 1))
-                and current_value > credit):
+        # Trigger only when spread has been strictly higher than the
+        # prior check on every one of the last _TREND_WINDOW checks
+        # (any flat or improving check resets the counter to 0) AND
+        # we are already in loss territory (spread > credit).
+        if streak >= _TREND_WINDOW and current_value > credit:
             loss_pct = abs(profit_pct)
-            print(f"  📈 TREND STOP — spread rising {_TREND_WINDOW} checks "
-                  f"in a row while in loss ({loss_pct:.1f}% loss). Closing.")
+            print(f"  📈 TREND STOP — spread strictly higher for "
+                  f"{streak} consecutive checks while in loss "
+                  f"({loss_pct:.1f}%). Closing.")
             try:
                 response = place_closing_order(pos, current_value)
                 profit   = log_closed_trade(
@@ -396,9 +400,11 @@ def check_positions():
 # ── In-memory state for fluid stops (reset each monitor session) ──────────────
 # Trailing profit: tracks peak profit % seen so far per trade id
 _peak_profit: dict[int, float] = {}
-# Trend tracking: last N spread values per trade id (newest last)
-_spread_history: dict[int, list] = {}
-_TREND_WINDOW = 10         # consecutive rising checks needed to trigger
+# Trend stop: count of consecutive checks where spread was strictly higher
+# than the previous check. Resets to 0 the moment a check is flat or lower.
+_consecutive_rises: dict[int, int] = {}
+_last_spread_value: dict[int, float] = {}
+_TREND_WINDOW = 10         # consecutive strictly-rising checks needed to trigger
 _TRAIL_TRIGGER_PCT = 25.0  # profit must have hit this % before trailing
 _TRAIL_DROP_PCT   = 10.0   # close if profit drops this many points from peak
 
