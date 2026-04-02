@@ -21,6 +21,45 @@ _session = get_tradier_session()  # SSL-verified session for Tradier API
 
 # ── Helpers ───────────────────────────────────────────────────
 
+def fetch_buying_power():
+    """
+    Fetch account balances from Tradier and return option buying power.
+    Returns (option_buying_power, total_equity) or (None, None) on error.
+    """
+    try:
+        r = _session.get(
+            f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/balances",
+            headers=TRADIER_HEADERS,
+            timeout=10
+        )
+        r.raise_for_status()
+        data = r.json()
+        balances = data.get("balances", {})
+        # option_buying_power for defined-risk spreads; fall back to cash
+        obp = (balances.get("option_buying_power")
+               or balances.get("total_cash")
+               or 0)
+        equity = balances.get("total_equity", 0)
+        return float(obp), float(equity)
+    except Exception as e:
+        print(f"⚠️  Could not fetch buying power: {e}")
+        return None, None
+
+
+def suggest_contracts(max_loss_per_contract, buying_power, risk_pct=0.05):
+    """
+    Suggest a number of contracts using at most risk_pct of buying power
+    per trade (default 5%).  Returns at least 1.
+    """
+    if not buying_power or buying_power <= 0:
+        return 1
+    budget = buying_power * risk_pct
+    max_loss_dollars = max_loss_per_contract * 100
+    if max_loss_dollars <= 0:
+        return 1
+    return max(1, int(budget / max_loss_dollars))
+
+
 def load_data():
     """Load trade recommendations and Claude analysis."""
     with open("data/report_table.json", "r") as f:
@@ -253,6 +292,17 @@ def main():
 
     trades, recommendations, heat_scores = load_data()
 
+    # Fetch account buying power
+    buying_power, total_equity = fetch_buying_power()
+    if buying_power is not None:
+        print(f"\n💼 Account: {TRADIER_ACCOUNT_ID}")
+        print(f"   Option Buying Power: ${buying_power:,.2f}")
+        if total_equity:
+            print(f"   Total Equity:        ${total_equity:,.2f}")
+        print(f"   Risk per trade (5%): ${buying_power * 0.05:,.2f}")
+    else:
+        print(f"\n⚠️  Buying power unavailable — enter contracts manually")
+
     # Only present trades Claude recommended as TRADE
     actionable = [
         t for t in trades
@@ -304,6 +354,11 @@ def main():
         print(f"  Stop Loss (2x):      close when spread = "
               f"${credit * 2:.2f}")
         print()
+
+        # Suggest contract count based on buying power (5% risk per trade)
+        suggested = suggest_contracts(max_loss, buying_power)
+        if buying_power:
+            print(f"  Suggested contracts (5% of ${buying_power:,.0f} BP): {suggested}")
 
         # Ask how many contracts
         while True:

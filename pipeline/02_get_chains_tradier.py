@@ -104,8 +104,10 @@ def build_strikes(options, stock_price):
             strikes[strike]["call_open_interest"] = oi
             g = opt.get("greeks") or {}
             if g:
+                # mid_iv is Tradier's mid-price IV; smv_vol is smoothed fallback
+                iv_val = float(g.get("mid_iv") or g.get("smv_vol") or 0)
                 strikes[strike]["call_greeks"] = {
-                    "iv":    float(g.get("smv_vol") or 0),
+                    "iv":    iv_val,
                     "delta": float(g.get("delta") or 0),
                     "gamma": float(g.get("gamma") or 0),
                     "theta": float(g.get("theta") or 0),
@@ -119,8 +121,9 @@ def build_strikes(options, stock_price):
             strikes[strike]["put_open_interest"] = oi
             g = opt.get("greeks") or {}
             if g:
+                iv_val = float(g.get("mid_iv") or g.get("smv_vol") or 0)
                 strikes[strike]["put_greeks"] = {
-                    "iv":    float(g.get("smv_vol") or 0),
+                    "iv":    iv_val,
                     "delta": float(g.get("delta") or 0),
                     "gamma": float(g.get("gamma") or 0),
                     "theta": float(g.get("theta") or 0),
