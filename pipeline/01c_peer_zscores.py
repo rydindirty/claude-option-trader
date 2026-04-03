@@ -63,6 +63,74 @@ from config import FINNHUB_API_KEY
 _CALL_DELAY = 2.1
 _FINNHUB_BASE = "https://finnhub.io/api/v1"
 
+# ── Sector normalization ─────────────────────────────────────────────────────
+# Finnhub returns granular industry names. With only ~22 tickers many end up
+# as singletons. Map to broader GICS-style sectors so more tickers share a
+# peer group and get meaningful z-scores.
+_SECTOR_MAP = {
+    # Information Technology
+    "Technology":            "Information Technology",
+    "Semiconductors":        "Information Technology",
+    "Communications":        "Information Technology",   # networking gear (ANET)
+    "Electrical Equipment":  "Information Technology",   # fiber/optics (GLW)
+    "IT Services":           "Information Technology",
+    "Software":              "Information Technology",
+    # Communication Services
+    "Media":                 "Communication Services",
+    "Interactive Media":     "Communication Services",
+    "Entertainment":         "Communication Services",
+    "Telecommunication":     "Communication Services",
+    # Financials
+    "Financial Services":    "Financials",
+    "Banking":               "Financials",
+    "Capital Markets":       "Financials",
+    "Insurance":             "Financials",
+    "Consumer Finance":      "Financials",
+    # Consumer Discretionary
+    "Hotels, Restaurants":   "Consumer Discretionary",
+    "Retail":                "Consumer Discretionary",
+    "Consumer products":     "Consumer Discretionary",   # homebuilders (DHI)
+    "Automobiles":           "Consumer Discretionary",
+    "Homebuilding":          "Consumer Discretionary",
+    "Internet & Direct":     "Consumer Discretionary",
+    # Consumer Staples
+    "Food":                  "Consumer Staples",
+    "Beverages":             "Consumer Staples",
+    "Tobacco":               "Consumer Staples",
+    "Household Products":    "Consumer Staples",
+    # Energy
+    "Energy":                "Energy",
+    "Oil":                   "Energy",
+    # Materials
+    "Metals & Mining":       "Materials",
+    "Chemicals":             "Materials",
+    "Construction Materials":"Materials",
+    # Industrials
+    "Aerospace":             "Industrials",
+    "Machinery":             "Industrials",
+    "Air Freight":           "Industrials",
+    # Health Care
+    "Pharmaceuticals":       "Health Care",
+    "Biotechnology":         "Health Care",
+    "Health Care":           "Health Care",
+    # Utilities
+    "Utilities":             "Utilities",
+    "Electric":              "Utilities",
+    # Real Estate
+    "Real Estate":           "Real Estate",
+    "REIT":                  "Real Estate",
+}
+
+
+def normalize_sector(raw: str) -> str:
+    """Map a Finnhub industry string to a broader GICS-style sector name."""
+    if not raw or raw == "Unknown":
+        return "Unknown"
+    for keyword, gics in _SECTOR_MAP.items():
+        if keyword.lower() in raw.lower():
+            return gics
+    return raw   # keep original if no mapping matches
+
 
 # ── Finnhub helpers ─────────────────────────────────────────────────────────
 
@@ -81,10 +149,11 @@ def _fh_get(endpoint, params=None):
 
 
 def fetch_sector(ticker):
-    """Return the Finnhub industry string for a ticker, or 'Unknown'."""
+    """Return a normalized GICS-style sector for a ticker, or 'Unknown'."""
     time.sleep(_CALL_DELAY)
     data = _fh_get("/stock/profile2", {"symbol": ticker})
-    return (data or {}).get("finnhubIndustry") or "Unknown"
+    raw = (data or {}).get("finnhubIndustry") or "Unknown"
+    return normalize_sector(raw)
 
 
 def fetch_peers(ticker):

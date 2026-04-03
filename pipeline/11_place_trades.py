@@ -35,8 +35,10 @@ def fetch_buying_power():
         r.raise_for_status()
         data = r.json()
         balances = data.get("balances", {})
-        # option_buying_power for defined-risk spreads; fall back to cash
-        obp = (balances.get("option_buying_power")
+        # option_buying_power lives under balances.margin for margin accounts
+        margin = balances.get("margin", {}) or {}
+        obp = (margin.get("option_buying_power")
+               or balances.get("option_buying_power")
                or balances.get("total_cash")
                or 0)
         equity = balances.get("total_equity", 0)
@@ -318,6 +320,7 @@ def main():
 
     placed = []
     skipped = []
+    remaining_bp = buying_power  # decremented as trades are approved
 
     for trade in actionable:
         short_strike, long_strike = parse_strikes(trade["legs"])
@@ -355,10 +358,16 @@ def main():
               f"${credit * 2:.2f}")
         print()
 
-        # Suggest contract count based on buying power (5% risk per trade)
-        suggested = suggest_contracts(max_loss, buying_power)
-        if buying_power:
-            print(f"  Suggested contracts (60% of ${buying_power:,.0f} BP): {suggested}")
+        # Suggest contract count based on remaining buying power
+        margin_per_contract = max_loss * 100
+        suggested = suggest_contracts(max_loss, remaining_bp)
+        if remaining_bp:
+            print(f"  Margin per contract:  ${margin_per_contract:,.0f}")
+            print(f"  Remaining BP:         ${remaining_bp:,.0f}")
+            print(f"  Suggested contracts (60% of remaining BP): {suggested}")
+        else:
+            print(f"  Margin per contract:  ${margin_per_contract:,.0f}")
+            print(f"  ⚠️  Buying power unavailable — enter contracts manually")
 
         # Ask how many contracts
         while True:
@@ -418,6 +427,10 @@ def main():
                 print(f"  ✅ Order placed! ID: {order_id} | Status: {status}")
                 save_placed_trade(trade, contracts, response)
                 placed.append(trade["ticker"])
+                if remaining_bp is not None:
+                    margin_used = contracts * max_loss * 100
+                    remaining_bp -= margin_used
+                    print(f"  💼 Remaining BP after this trade: ${remaining_bp:,.0f}")
             except Exception as e:
                 print(f"  ❌ Order failed: {e}")
         else:
