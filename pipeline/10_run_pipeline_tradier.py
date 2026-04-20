@@ -102,6 +102,8 @@ def show_audit():
         ("data/ranked_spreads.json",       "Spreads ranked"),
         ("data/report_table.json",         "Report table"),
         ("data/macro_regime.json",         "Macro regime"),
+        ("data/ohlcv.json",                "OHLCV history"),
+        ("data/kronos_signals.json",       "Kronos AI forecasts"),
         ("data/top9_analysis.json",        "Claude analysis"),
     ]
 
@@ -193,6 +195,8 @@ def main():
         ("00F", "pipeline/00f_get_news_tradier.py",          "Fetch news headlines"),
         ("00G", "pipeline/00g_claude_sentiment_filter.py",   "Claude sentiment filter"),
         ("00H", "pipeline/00h_macro_regime.py",              "Macro regime classification"),
+        ("00I", "pipeline/00i_fetch_ohlcv.py",               "Fetch OHLCV history (Tradier)"),
+        ("01D", "pipeline/01d_kronos_forecast.py",           "Kronos AI price forecast"),
         ("01",  "pipeline/01_get_prices_tradier.py",         "Get real-time prices"),
         ("01B", "pipeline/01b_get_technicals.py",            "Compute technical indicators"),
         ("02",  "pipeline/02_get_chains_tradier.py",         "Get options chains"),

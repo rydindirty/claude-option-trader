@@ -1,0 +1,23 @@
+# Core pipeline
+requests
+python-dotenv
+pandas
+numpy
+
+# Anthropic / Claude API
+anthropic
+
+# Finnhub news + sector data
+finnhub-python
+
+# FRED macro data
+fredapi
+
+# Kronos AI forecast (Step 01D)
+# M1 Mac: standard pip install includes MPS support automatically
+torch
+transformers
+huggingface_hub
+
+# Kronos model code (one-time setup — see pipeline/01d_kronos_forecast.py):
+#   git clone https://github.com/shiyu-coder/Kronos vendor/kronos

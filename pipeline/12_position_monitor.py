@@ -11,6 +11,7 @@ positions against three exit rules:
 Sends a clear terminal alert and places the closing order
 automatically via Tradier.
 """
+import json
 import os
 import sys
 import time
@@ -29,9 +30,9 @@ _session = get_tradier_session()  # SSL-verified session for Tradier API
 
 # ── Market hours (ET) ──────────────────────────────────────────
 MARKET_OPEN_HOUR  = 9
-MARKET_OPEN_MIN   = 35   # 5 min after open to avoid chaos
-MARKET_CLOSE_HOUR = 15
-MARKET_CLOSE_MIN  = 55   # 5 min before close
+MARKET_OPEN_MIN   = 30
+MARKET_CLOSE_HOUR = 16
+MARKET_CLOSE_MIN  = 0
 
 
 _ET = ZoneInfo("America/New_York")
@@ -369,11 +370,101 @@ def check_positions():
 # Trailing profit: tracks peak profit % seen so far per trade id
 _peak_profit: dict[int, float] = {}
 _TRAIL_TRIGGER_PCT = 25.0  # profit must have hit this % before trailing
-_TRAIL_DROP_PCT   = 10.0   # close if profit drops this many points from peak
+_TRAIL_DROP_PCT    = 5.0   # close if profit drops this many points from peak
 
 
 LOCK_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "data", "monitor.pid")
+
+# ── Manual close ───────────────────────────────────────────────
+# To force-close a position at any time (including before Friday EOD
+# to avoid Monday morning gap risk), create this file:
+#
+#   echo '{"ticker": "AAPL"}' > data/manual_close.json
+#
+# or with a specific trade ID:
+#   echo '{"trade_id": 5}' > data/manual_close.json
+#
+# The monitor will execute the close at the next check if the market
+# is open, or queue it for market open if the market is currently closed.
+MANUAL_CLOSE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "manual_close.json"
+)
+
+
+def check_manual_close_requests():
+    """
+    Check for data/manual_close.json and close the matching position.
+    Called on every monitor loop iteration, including outside market hours,
+    so a Friday-evening request executes at Monday's first check.
+    """
+    if not os.path.exists(MANUAL_CLOSE_FILE):
+        return
+
+    try:
+        with open(MANUAL_CLOSE_FILE) as f:
+            request = json.load(f)
+    except Exception as e:
+        print(f"\n   ⚠️  manual_close.json parse error: {e} — removing bad file")
+        os.remove(MANUAL_CLOSE_FILE)
+        return
+
+    target_ticker = request.get("ticker", "").upper().strip()
+    target_id     = request.get("trade_id")
+
+    if not target_ticker and not target_id:
+        print("\n   ⚠️  manual_close.json must have 'ticker' or 'trade_id' — removing")
+        os.remove(MANUAL_CLOSE_FILE)
+        return
+
+    positions = load_positions()
+    match = None
+    for pos in positions:
+        if target_id is not None and pos["id"] == target_id:
+            match = pos
+            break
+        if target_ticker and pos["ticker"].upper() == target_ticker:
+            match = pos
+            break
+
+    label = target_ticker or f"id={target_id}"
+
+    if not match:
+        print(f"\n   ⚠️  Manual close: no open position found for {label} — removing request")
+        os.remove(MANUAL_CLOSE_FILE)
+        return
+
+    ticker = match["ticker"]
+    print(f"\n{'='*60}")
+    print(f"🚨 MANUAL CLOSE REQUEST — {ticker}")
+
+    if not is_market_hours():
+        now_str = datetime.now(_ET).strftime("%H:%M ET")
+        print(f"   Market is currently closed ({now_str}).")
+        print(f"   Request queued — will execute at next market open check.")
+        print(f"   (data/manual_close.json kept in place)")
+        return   # Leave the file; execute when market opens
+
+    close_val = get_spread_value(match["short_symbol"], match["long_symbol"])
+    if close_val is None:
+        print(f"   ⚠️  Could not get live price — will retry next check")
+        return   # Leave the file; retry next iteration
+
+    credit     = match["credit_received"]
+    profit_pct = (credit - close_val) / credit * 100
+    print(f"   Credit: ${credit:.2f} | Close cost: ${close_val:.2f} | "
+          f"P&L: {profit_pct:.1f}%")
+
+    try:
+        response = place_closing_order(match, close_val)
+        profit   = log_closed_trade(match, "manual_close", close_val, response)
+        print(f"   ✅ Manual close executed | P&L: ${profit:.2f}")
+        os.remove(MANUAL_CLOSE_FILE)
+    except Exception as e:
+        print(f"   ❌ Manual close order failed: {e}")
+        traceback.print_exc()
+        print(f"   data/manual_close.json kept — will retry next check")
 
 
 def acquire_lock():
@@ -427,16 +518,20 @@ def run_monitor(interval_minutes=1):
           f"{MARKET_CLOSE_HOUR}:{MARKET_CLOSE_MIN:02d} ET")
     print(f"   Open positions in DB: {len(open_positions)}")
     print(f"   Exit rules:")
-    print(f"     Profit target: 40% of max credit")
-    print(f"     Stop loss:     2x credit received")
-    print(f"     Time stop:     hard close at DTE < 21")
-    print(f"                    DTE = 21: EOD check after 3:30 PM")
+    print(f"     Profit target:  40% of max credit")
+    print(f"     Trailing stop:  activated at {_TRAIL_TRIGGER_PCT:.0f}%, "
+          f"closes if drops {_TRAIL_DROP_PCT:.0f}pts from peak")
+    print(f"     Stop loss:      2x credit received")
+    print(f"     Time stop:      hard close at DTE < 21")
+    print(f"                     DTE = 21: EOD check after 3:30 PM")
+    print(f"   Manual close:  echo '{{\"ticker\": \"AAPL\"}}' > data/manual_close.json")
     print("=" * 60)
     print("\nPress Ctrl+C to stop\n")
 
     try:
         while True:
             try:
+                check_manual_close_requests()   # runs regardless of market hours
                 if is_market_hours():
                     check_positions()
                 else:

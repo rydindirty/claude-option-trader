@@ -44,6 +44,15 @@ def load_comprehensive_data():
     except FileNotFoundError:
         data["peers"] = {}
 
+    try:
+        with open("data/kronos_signals.json", "r") as f:
+            ks = json.load(f)
+            data["kronos"] = ks.get("signals", {})
+            data["kronos_installed"] = ks.get("kronos_installed", False)
+    except FileNotFoundError:
+        data["kronos"] = {}
+        data["kronos_installed"] = False
+
     # Enrich each trade with current price and buffer percentage
     for trade in data["trades"]:
         ticker = trade["ticker"]
@@ -141,6 +150,20 @@ TRADES WITH NEWS:
         ret_z_str   = f"{ret_z:+.2f}" if ret_z is not None else "n/a"
         peer_str    = ", ".join(peer_peers) if peer_peers else "none in universe"
 
+        # Build Kronos forecast line
+        kron        = data.get("kronos", {}).get(ticker, {})
+        kron_pct    = kron.get("forecast_pct")
+        kron_dir    = kron.get("direction", "neutral")
+        if kron_pct is not None and data.get("kronos_installed"):
+            kron_icon = "📈" if kron_dir == "bullish" else ("📉" if kron_dir == "bearish" else "➡️")
+            kron_bp   = kron.get("kronos_mult_bull_put",  1.0)
+            kron_bc   = kron.get("kronos_mult_bear_call", 1.0)
+            spread_mult = kron_bp if "Put" in trade["type"] else kron_bc
+            kron_str  = (f"{kron_icon} Kronos 5d forecast: {kron_pct:+.2f}% "
+                         f"({kron_dir}, score ×{spread_mult:.2f})")
+        else:
+            kron_str  = "Kronos forecast: not available"
+
         prompt += f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TRADE #{i}: {ticker} {trade['type']} {trade['legs']}
@@ -150,6 +173,7 @@ METRICS:
 - DTE: {dte} | ROI: {roi:.1f}% | PoP: {pop:.1f}% | Score: {score:.1f}
 - Sector: {sector} | IV vs peers: z={iv_z_str} | 20d return vs peers: z={ret_z_str}
 - Sector peers in today's universe: {peer_str}
+- {kron_str}
 
 NEWS (last 3 days):
 """

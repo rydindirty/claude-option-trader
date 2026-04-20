@@ -1,10 +1,10 @@
 """
 Rank Spreads: One spread per ticker only.
-Applies two independent score multipliers and regime-adjusted entry thresholds.
+Applies independent score multipliers and regime-adjusted entry thresholds.
 
 Final score formula:
-  base_score    = (ROI × PoP) / 100
-  adjusted_score = base_score × regime_multiplier × tech_multiplier
+  base_score     = (ROI × PoP) / 100
+  adjusted_score = base_score × regime_mult × tech_mult × peer_mult × kronos_mult
 
 1. Macro regime multiplier (from data/macro_regime.json, step 00H):
      Goldilocks  — Bull Put ×1.15 | Bear Call ×0.90
@@ -20,8 +20,15 @@ Final score formula:
      bearish        — Bull Put ×0.92 | Bear Call ×1.08
      strong_bearish — Bull Put ×0.85 | Bear Call ×1.15
 
+3. Kronos AI forecast multiplier (from data/kronos_signals.json, step 01D):
+     Bull Put + bullish forecast ≥3%  — ×1.20 | bearish ≥3%  — ×0.80
+     Bull Put + bullish forecast ≥1.5%— ×1.12 | bearish ≥1.5%— ×0.88
+     Bull Put + bullish forecast ≥0.5%— ×1.06 | bearish ≥0.5%— ×0.94
+     (Bear Call logic mirrors: bearish aligned, bullish opposing)
+     Falls back to ×1.00 if Kronos not installed or ticker absent.
+
 Entry thresholds shift per regime; see 00h_macro_regime.py for details.
-Both files fall back gracefully (×1.00, standard thresholds) if absent.
+All files fall back gracefully (×1.00, standard thresholds) if absent.
 """
 import json
 import os
@@ -107,6 +114,27 @@ def load_peer_zscores():
         return {}
 
 
+def load_kronos_signals():
+    """
+    Load per-ticker Kronos directional forecasts from kronos_signals.json.
+    Returns a dict: {ticker: {"kronos_mult_bull_put": float,
+                               "kronos_mult_bear_call": float,
+                               "forecast_pct": float,
+                               "direction": str}}.
+    Falls back to empty dict (×1.00) if file is absent or Kronos not installed.
+    """
+    try:
+        with open("data/kronos_signals.json", "r") as f:
+            data = json.load(f)
+        installed = data.get("kronos_installed", False)
+        if not installed:
+            print("   ℹ️  Kronos not installed — no Kronos adjustment applied")
+        return data.get("signals", {})
+    except FileNotFoundError:
+        print("   ⚠️  kronos_signals.json not found — no Kronos adjustment applied")
+        return {}
+
+
 def rank_spreads():
     print("=" * 60)
     print("STEP 6: Rank Spreads (1 per ticker)")
@@ -116,9 +144,10 @@ def rank_spreads():
         data = json.load(f)
     spreads = data["spreads"]
 
-    regime     = load_macro_regime()
-    tech_map   = load_technicals()
-    peer_map   = load_peer_zscores()
+    regime      = load_macro_regime()
+    tech_map    = load_technicals()
+    peer_map    = load_peer_zscores()
+    kronos_map  = load_kronos_signals()
 
     print(f"\n🌍 Macro Regime: {regime['regime_label']}")
     if regime["preferred_type"]:
@@ -128,8 +157,12 @@ def rank_spreads():
     print(f"   Entry thresholds: PoP ≥ {regime['enter_pop']}% | ROI ≥ {regime['enter_roi']}%")
     if regime["regime_note"]:
         print(f"   {regime['regime_note']}")
+    kronos_active = sum(1 for s in kronos_map.values()
+                        if s.get("direction") != "neutral")
     print(f"\n📊 Technicals: {len(tech_map)} tickers | "
-          f"Peer z-scores: {len(peer_map)} tickers")
+          f"Peer z-scores: {len(peer_map)} tickers | "
+          f"Kronos signals: {len(kronos_map)} tickers "
+          f"({kronos_active} directional)")
 
     print(f"\n🏆 Ranking {len(spreads)} spreads...")
 
@@ -150,11 +183,23 @@ def rank_spreads():
         # Peer z-score multiplier (IV elevation vs sector peers)
         peer_mult = peer_map.get(spread["ticker"], 1.0)
 
-        spread["score"]             = round(base_score * regime_mult * tech_mult * peer_mult, 1)
+        # Kronos AI directional forecast multiplier
+        kronos_sig  = kronos_map.get(spread["ticker"], {})
+        if spread_type == "Bull Put":
+            kronos_mult = kronos_sig.get("kronos_mult_bull_put",  1.0)
+        else:
+            kronos_mult = kronos_sig.get("kronos_mult_bear_call", 1.0)
+        kronos_dir  = kronos_sig.get("direction", "neutral")
+        kronos_pct  = kronos_sig.get("forecast_pct", 0.0)
+
+        spread["score"]             = round(base_score * regime_mult * tech_mult * peer_mult * kronos_mult, 1)
         spread["regime_multiplier"] = regime_mult
         spread["tech_signal"]       = signal
         spread["tech_multiplier"]   = tech_mult
         spread["peer_multiplier"]   = peer_mult
+        spread["kronos_direction"]  = kronos_dir
+        spread["kronos_forecast_pct"] = kronos_pct
+        spread["kronos_multiplier"] = kronos_mult
 
         # Regime-adjusted ENTER / WATCH thresholds
         if spread["pop"] >= regime["enter_pop"] and spread["roi"] >= regime["enter_roi"]:
@@ -206,14 +251,18 @@ def rank_spreads():
 
     print(f"\n🎯 Top 9 Spreads:")
     for spread in unique_spreads[:9]:
-        r_mult = spread.get("regime_multiplier", 1.0)
-        t_mult = spread.get("tech_multiplier",   1.0)
-        p_mult = spread.get("peer_multiplier",   1.0)
-        signal = spread.get("tech_signal", "neutral")
-        parts  = []
+        r_mult  = spread.get("regime_multiplier", 1.0)
+        t_mult  = spread.get("tech_multiplier",   1.0)
+        p_mult  = spread.get("peer_multiplier",   1.0)
+        k_mult  = spread.get("kronos_multiplier", 1.0)
+        k_dir   = spread.get("kronos_direction",  "neutral")
+        k_pct   = spread.get("kronos_forecast_pct", 0.0)
+        signal  = spread.get("tech_signal", "neutral")
+        parts   = []
         if r_mult != 1.0: parts.append(f"regime×{r_mult:.2f}")
         if t_mult != 1.0: parts.append(f"tech×{t_mult:.2f}")
         if p_mult != 1.0: parts.append(f"peer×{p_mult:.2f}")
+        if k_mult != 1.0: parts.append(f"kronos×{k_mult:.2f}({k_dir} {k_pct:+.1f}%)")
         adj_note = f" ({' × '.join(parts)})" if parts else ""
         print(f"   #{spread['rank']}: {spread['ticker']} {spread['type']} "
               f"${spread['short_strike']:.0f}/${spread['long_strike']:.0f}  "
