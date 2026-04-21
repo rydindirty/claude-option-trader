@@ -246,6 +246,19 @@ def place_order(trade, contracts):
     return r.json()
 
 
+def _read_regime():
+    """Read current regime label from macro_regime.json, or None if unavailable."""
+    try:
+        regime_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "macro_regime.json"
+        )
+        with open(regime_path) as f:
+            return json.load(f).get("regime_label")
+    except Exception:
+        return None
+
+
 def save_placed_trade(trade, contracts, order_response):
     """
     Insert placed trade into data/trades.db for the position monitor to track.
@@ -276,6 +289,7 @@ def save_placed_trade(trade, contracts, order_response):
         "opened_at":         datetime.now().isoformat(),
         "profit_target_pct": 0.40,
         "stop_loss_pct":     1.50,
+        "regime":            _read_regime(),
     }
 
     row_id = db.insert_open_trade(position)
