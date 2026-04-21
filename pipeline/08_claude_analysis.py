@@ -141,15 +141,34 @@ TRADES WITH NEWS:
         ret_z_str   = f"{ret_z:+.2f}" if ret_z is not None else "n/a"
         peer_str    = ", ".join(peer_peers) if peer_peers else "none in universe"
 
+        quant_decision = trade.get("decision", "UNKNOWN")
+        quant_score    = trade.get("score", score)
+        kronos_dir     = trade.get("kronos_direction", "n/a")
+        kronos_pct     = trade.get("kronos_forecast_pct", 0.0)
+        if kronos_dir not in ("n/a", "neutral"):
+            kronos_line = f"Kronos 5-day forecast: {kronos_dir} ({kronos_pct:+.1f}%) — model-predicted price direction"
+        else:
+            kronos_line = "Kronos 5-day forecast: neutral (no directional signal)"
+
+        dec_context = {
+            "ENTER": "✅ Quant engine says ENTER — PoP and ROI clear both thresholds.",
+            "WATCH": "🟡 Quant engine says WATCH — borderline; cleared watch threshold only.",
+            "SKIP":  "🔴 Quant engine says SKIP — did NOT clear entry/watch thresholds. Presented for completeness only."
+        }.get(quant_decision, "")
+
         prompt += f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TRADE #{i}: {ticker} {trade['type']} {trade['legs']}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUANT DECISION: {quant_decision}  |  Quant Score: {quant_score:.1f}
+{dec_context}
+
 METRICS:
 - Current: ${current:.2f} | Short Strike: ${trade['short_strike']:.0f} | Buffer: {buffer:.1f}%
-- DTE: {dte} | ROI: {roi:.1f}% | PoP: {pop:.1f}% | Score: {score:.1f}
+- DTE: {dte} | ROI: {roi:.1f}% | PoP: {pop:.1f}%
 - Sector: {sector} | IV vs peers: z={iv_z_str} | 20d return vs peers: z={ret_z_str}
 - Sector peers in today's universe: {peer_str}
+- {kronos_line}
 
 NEWS (last 3 days):
 """
@@ -216,7 +235,17 @@ def main():
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=4096,
-            system="You analyze credit spreads with structured 5W1H news analysis. Extract specific dates, events, and entities from headlines and summaries. Assign risk heat scores 1-10. Be specific with dates and events.",
+            system=(
+                "You analyze credit spreads with structured 5W1H news analysis. "
+                "Each trade shows a QUANT DECISION (ENTER/WATCH/SKIP) computed by a quantitative engine "
+                "based on probability of profit, ROI thresholds, macro regime, technicals, peer z-scores, "
+                "and Kronos AI price forecasts. "
+                "Your job is news/catalyst risk assessment — not to override a SKIP without a compelling reason. "
+                "If quant says SKIP, your default should also be Skip unless there is a strong newsflow reason to reconsider. "
+                "If quant says ENTER and news is clean, confirm Trade. "
+                "Extract specific dates, events, and entities from headlines. Assign risk heat scores 1-10. "
+                "Be specific with dates and events."
+            ),
             messages=[
                 {"role": "user", "content": prompt}
             ]

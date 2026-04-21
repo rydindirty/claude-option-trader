@@ -67,8 +67,12 @@ def show_flow():
 
         with open("data/ranked_spreads.json", "r") as f:
             ranked = json.load(f)
-            print(f"   ↓ Ranked: {ranked['summary']['total']}")
-            print(f"   ↓ Top 22 (1 per ticker): {len(ranked['top_22'])}")
+            summary = ranked.get("summary", {})
+            print(f"   ↓ Ranked: {summary.get('total', len(ranked.get('ranked_spreads', [])))}")
+            enter = summary.get("enter", 0)
+            watch = summary.get("watch", 0)
+            skip  = summary.get("skip", 0)
+            print(f"   ↓ ENTER: {enter} | WATCH: {watch} | SKIP: {skip}")
 
         with open("data/top9_analysis.json", "r") as f:
             print(f"\n🎯 Final Output: 9 trades ready")
@@ -102,6 +106,8 @@ def show_audit():
         ("data/ranked_spreads.json",       "Spreads ranked"),
         ("data/report_table.json",         "Report table"),
         ("data/macro_regime.json",         "Macro regime"),
+        ("data/ohlcv.json",                "OHLCV history (Kronos input)"),
+        ("data/kronos_signals.json",       "Kronos AI forecasts"),
         ("data/top9_analysis.json",        "Claude analysis"),
     ]
 
@@ -193,12 +199,14 @@ def main():
         ("00F", "pipeline/00f_get_news_tradier.py",          "Fetch news headlines"),
         ("00G", "pipeline/00g_claude_sentiment_filter.py",   "Claude sentiment filter"),
         ("00H", "pipeline/00h_macro_regime.py",              "Macro regime classification"),
+        ("00I", "pipeline/00i_fetch_ohlcv.py",               "Fetch OHLCV history (Kronos input)"),
         ("01",  "pipeline/01_get_prices_tradier.py",         "Get real-time prices"),
         ("01B", "pipeline/01b_get_technicals.py",            "Compute technical indicators"),
         ("02",  "pipeline/02_get_chains_tradier.py",         "Get options chains"),
         ("03",  "pipeline/03_check_liquidity_tradier.py",    "Check liquidity"),
         ("04",  "pipeline/04_get_greeks_tradier.py",         "Extract Greeks"),
         ("01C", "pipeline/01c_peer_zscores.py",              "Peer group z-scoring"),
+        ("01D", "pipeline/01d_kronos_forecast.py",           "Kronos AI price forecast"),
         ("05",  "pipeline/05_calculate_spreads_tradier.py",  "Calculate spreads"),
         ("06",  "pipeline/06_rank_spreads_tradier.py",       "Rank by score"),
         ("07",  "pipeline/07_build_report_tradier.py",       "Build report table"),
