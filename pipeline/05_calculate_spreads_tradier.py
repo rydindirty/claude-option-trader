@@ -126,7 +126,7 @@ def calculate_spreads():
                         delta=short_strike["put_greeks"]["delta"]
                     )
                     
-                    if roi >= 5 and roi <= 50 and pop >= 60:
+                    if roi >= 5 and roi <= 50 and pop >= 70:
                         spread = {
                             "ticker": ticker,
                             "type": "Bull Put",
@@ -183,7 +183,7 @@ def calculate_spreads():
                         delta=short_strike["call_greeks"]["delta"]
                     )
                     
-                    if roi >= 5 and roi <= 50 and pop >= 60:
+                    if roi >= 5 and roi <= 50 and pop >= 70:
                         spread = {
                             "ticker": ticker,
                             "type": "Bear Call",

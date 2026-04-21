@@ -16,7 +16,11 @@ def build_report_table():
     with open("data/ranked_spreads.json", "r") as f:
         data = json.load(f)
     
-    spreads = data["ranked_spreads"][:9]
+    # Prioritize actionable spreads: ENTER first, then WATCH, then SKIP to fill
+    enter = [s for s in data["ranked_spreads"] if s.get("decision") == "ENTER"]
+    watch = [s for s in data["ranked_spreads"] if s.get("decision") == "WATCH"]
+    skip  = [s for s in data["ranked_spreads"] if s.get("decision") == "SKIP"]
+    spreads = (enter + watch + skip)[:9]
     
     try:
         from data.stocks import EDGE_REASON
@@ -52,7 +56,9 @@ def build_report_table():
             "edge_reason": EDGE_REASON.get(ticker, ""),
             "iv": spread["short_iv"],
             "delta": spread["short_delta"],
-            "score": spread["score"]
+            "score": spread["score"],
+            "kronos_direction": spread.get("kronos_direction", "n/a"),
+            "kronos_forecast_pct": spread.get("kronos_forecast_pct", 0.0)
         }
         report_entries.append(entry)
     

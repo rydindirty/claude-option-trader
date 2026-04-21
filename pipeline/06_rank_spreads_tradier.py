@@ -1,10 +1,14 @@
 """
 Rank Spreads: One spread per ticker only.
-Applies two independent score multipliers and regime-adjusted entry thresholds.
+Applies independent score multipliers and regime-adjusted entry thresholds.
 
 Final score formula:
-  base_score    = (ROI × PoP) / 100
-  adjusted_score = base_score × regime_multiplier × tech_multiplier
+  base_score     = pop * (1 + roi / 100)   ← PoP is primary; ROI adds bonus
+  adjusted_score = base_score × regime_mult × tech_mult × peer_mult × kronos_mult
+
+This formula ensures that a 80% PoP / 20% ROI spread (score 96) beats a
+70% PoP / 35% ROI spread (score 94.5), which is the correct risk ordering
+for credit spreads. The old roi*pop/100 formula inverted this.
 
 1. Macro regime multiplier (from data/macro_regime.json, step 00H):
      Goldilocks  — Bull Put ×1.15 | Bear Call ×0.90
@@ -20,8 +24,20 @@ Final score formula:
      bearish        — Bull Put ×0.92 | Bear Call ×1.08
      strong_bearish — Bull Put ×0.85 | Bear Call ×1.15
 
+3. Peer z-score multiplier (from data/peer_zscores.json, step 01C):
+     Derived from IV and return z-scores vs sector peers.
+
+4. Kronos AI multiplier (from data/kronos_signals.json, step 01D):
+     Aligned ≥3.0% forecast  — ×1.20
+     Aligned ≥1.5% forecast  — ×1.12
+     Aligned ≥0.5% forecast  — ×1.06
+     Opposing ≥3.0% forecast — ×0.80
+     Opposing ≥1.5% forecast — ×0.88
+     Opposing ≥0.5% forecast — ×0.94
+     Neutral (<0.5% move)    — ×1.00
+
 Entry thresholds shift per regime; see 00h_macro_regime.py for details.
-Both files fall back gracefully (×1.00, standard thresholds) if absent.
+All files fall back gracefully (×1.00, standard thresholds) if absent.
 """
 import json
 import os
@@ -30,7 +46,6 @@ from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ── Default tech multipliers — used when technicals.json is absent ─────────
 _TECH_MULTIPLIERS = {
     "strong_bullish": {"Bull Put": 1.15, "Bear Call": 0.85},
     "bullish":        {"Bull Put": 1.08, "Bear Call": 0.93},
@@ -39,7 +54,6 @@ _TECH_MULTIPLIERS = {
     "strong_bearish": {"Bull Put": 0.85, "Bear Call": 1.15},
 }
 
-# ── Neutral defaults — used when macro_regime.json is absent ───────────────
 _NEUTRAL = {
     "regime_label":         "Neutral",
     "preferred_type":       None,
@@ -47,14 +61,13 @@ _NEUTRAL = {
     "bear_call_multiplier": 1.0,
     "enter_pop":            70,
     "enter_roi":            20,
-    "watch_pop":            60,
+    "watch_pop":            65,
     "watch_roi":            30,
     "regime_note":          ""
 }
 
 
 def load_macro_regime():
-    """Load regime config from macro_regime.json; fall back to neutral."""
     try:
         with open("data/macro_regime.json", "r") as f:
             data = json.load(f)
@@ -66,7 +79,7 @@ def load_macro_regime():
             "bear_call_multiplier": adj.get("bear_call_multiplier", 1.0),
             "enter_pop":            adj.get("enter_pop", 70),
             "enter_roi":            adj.get("enter_roi", 20),
-            "watch_pop":            adj.get("watch_pop", 60),
+            "watch_pop":            adj.get("watch_pop", 65),
             "watch_roi":            adj.get("watch_roi", 30),
             "regime_note":          data.get("regime_note", "")
         }
@@ -76,11 +89,6 @@ def load_macro_regime():
 
 
 def load_technicals():
-    """
-    Load per-ticker technical signals from technicals.json.
-    Returns a dict: {ticker: signal_str}.
-    Falls back to empty dict (neutral for all) if file is absent.
-    """
     try:
         with open("data/technicals.json", "r") as f:
             data = json.load(f)
@@ -92,11 +100,6 @@ def load_technicals():
 
 
 def load_peer_zscores():
-    """
-    Load per-ticker peer multipliers from peer_zscores.json.
-    Returns a dict: {ticker: peer_multiplier}.
-    Falls back to empty dict (×1.00 for all) if file is absent.
-    """
     try:
         with open("data/peer_zscores.json", "r") as f:
             data = json.load(f)
@@ -105,6 +108,26 @@ def load_peer_zscores():
     except FileNotFoundError:
         print("   ⚠️  peer_zscores.json not found — no peer adjustment applied")
         return {}
+
+
+def load_kronos_signals():
+    """Load per-ticker Kronos multipliers. Returns {ticker: {bull_put: float, bear_call: float}}."""
+    try:
+        with open("data/kronos_signals.json", "r") as f:
+            data = json.load(f)
+        result = {}
+        for ticker, sig in data.get("signals", {}).items():
+            result[ticker] = {
+                "bull_put":   sig.get("kronos_mult_bull_put",  1.0),
+                "bear_call":  sig.get("kronos_mult_bear_call", 1.0),
+                "direction":  sig.get("direction", "neutral"),
+                "forecast_pct": sig.get("forecast_pct", 0.0),
+            }
+        installed = data.get("kronos_installed", False)
+        return result, installed
+    except FileNotFoundError:
+        print("   ⚠️  kronos_signals.json not found — no Kronos adjustment applied")
+        return {}, False
 
 
 def rank_spreads():
@@ -116,9 +139,10 @@ def rank_spreads():
         data = json.load(f)
     spreads = data["spreads"]
 
-    regime     = load_macro_regime()
-    tech_map   = load_technicals()
-    peer_map   = load_peer_zscores()
+    regime      = load_macro_regime()
+    tech_map    = load_technicals()
+    peer_map    = load_peer_zscores()
+    kronos_map, kronos_installed = load_kronos_signals()
 
     print(f"\n🌍 Macro Regime: {regime['regime_label']}")
     if regime["preferred_type"]:
@@ -128,35 +152,49 @@ def rank_spreads():
     print(f"   Entry thresholds: PoP ≥ {regime['enter_pop']}% | ROI ≥ {regime['enter_roi']}%")
     if regime["regime_note"]:
         print(f"   {regime['regime_note']}")
-    print(f"\n📊 Technicals: {len(tech_map)} tickers | "
-          f"Peer z-scores: {len(peer_map)} tickers")
+    print(f"\n📊 Technicals: {len(tech_map)} tickers | Peer z-scores: {len(peer_map)} tickers")
+    kronos_status = "✅ active" if kronos_installed else "⚠️  neutral fallback"
+    print(f"   Kronos: {kronos_status} ({len(kronos_map)} tickers)")
 
     print(f"\n🏆 Ranking {len(spreads)} spreads...")
 
     for spread in spreads:
-        # Base score
-        base_score = (spread["roi"] * spread["pop"]) / 100
-
+        pop = spread["pop"]
+        roi = spread["roi"]
         spread_type = spread["type"]
+        ticker = spread["ticker"]
+
+        # PoP-primary base score: higher PoP always wins vs lower PoP at same ROI
+        base_score = pop * (1 + roi / 100)
 
         # Regime multiplier
         regime_mult = (regime["bull_put_multiplier"] if spread_type == "Bull Put"
                        else regime["bear_call_multiplier"])
 
         # Technical multiplier
-        signal    = tech_map.get(spread["ticker"], "neutral")
+        signal    = tech_map.get(ticker, "neutral")
         tech_mult = _TECH_MULTIPLIERS.get(signal, _TECH_MULTIPLIERS["neutral"])[spread_type]
 
-        # Peer z-score multiplier (IV elevation vs sector peers)
-        peer_mult = peer_map.get(spread["ticker"], 1.0)
+        # Peer z-score multiplier
+        peer_mult = peer_map.get(ticker, 1.0)
 
-        spread["score"]             = round(base_score * regime_mult * tech_mult * peer_mult, 1)
+        # Kronos AI multiplier
+        kronos_ticker = kronos_map.get(ticker, {})
+        if spread_type == "Bull Put":
+            kronos_mult = kronos_ticker.get("bull_put", 1.0)
+        else:
+            kronos_mult = kronos_ticker.get("bear_call", 1.0)
+
+        spread["score"]             = round(base_score * regime_mult * tech_mult * peer_mult * kronos_mult, 1)
         spread["regime_multiplier"] = regime_mult
         spread["tech_signal"]       = signal
         spread["tech_multiplier"]   = tech_mult
         spread["peer_multiplier"]   = peer_mult
+        spread["kronos_multiplier"] = kronos_mult
+        spread["kronos_direction"]  = kronos_ticker.get("direction", "n/a")
+        spread["kronos_forecast_pct"] = kronos_ticker.get("forecast_pct", 0.0)
 
-        # Regime-adjusted ENTER / WATCH thresholds
+        # Regime-adjusted ENTER / WATCH / SKIP thresholds
         if spread["pop"] >= regime["enter_pop"] and spread["roi"] >= regime["enter_roi"]:
             spread["decision"] = "ENTER"
         elif spread["pop"] >= regime["watch_pop"] and spread["roi"] >= regime["watch_roi"]:
@@ -164,10 +202,8 @@ def rank_spreads():
         else:
             spread["decision"] = "SKIP"
 
-    # Sort by adjusted score descending
     spreads.sort(key=lambda x: x["score"], reverse=True)
 
-    # Keep only the best-scoring spread per ticker
     seen_tickers = set()
     unique_spreads = []
     for spread in spreads:
@@ -206,18 +242,23 @@ def rank_spreads():
 
     print(f"\n🎯 Top 9 Spreads:")
     for spread in unique_spreads[:9]:
-        r_mult = spread.get("regime_multiplier", 1.0)
-        t_mult = spread.get("tech_multiplier",   1.0)
-        p_mult = spread.get("peer_multiplier",   1.0)
-        signal = spread.get("tech_signal", "neutral")
-        parts  = []
+        r_mult  = spread.get("regime_multiplier", 1.0)
+        t_mult  = spread.get("tech_multiplier",   1.0)
+        p_mult  = spread.get("peer_multiplier",   1.0)
+        k_mult  = spread.get("kronos_multiplier", 1.0)
+        signal  = spread.get("tech_signal", "neutral")
+        k_dir   = spread.get("kronos_direction", "n/a")
+        k_pct   = spread.get("kronos_forecast_pct", 0.0)
+        parts   = []
         if r_mult != 1.0: parts.append(f"regime×{r_mult:.2f}")
         if t_mult != 1.0: parts.append(f"tech×{t_mult:.2f}")
         if p_mult != 1.0: parts.append(f"peer×{p_mult:.2f}")
+        if k_mult != 1.0: parts.append(f"kronos×{k_mult:.2f}")
         adj_note = f" ({' × '.join(parts)})" if parts else ""
+        dec_icon = {"ENTER": "🟢", "WATCH": "🟡", "SKIP": "🔴"}.get(spread["decision"], "")
         print(f"   #{spread['rank']}: {spread['ticker']} {spread['type']} "
               f"${spread['short_strike']:.0f}/${spread['long_strike']:.0f}  "
-              f"[{signal}]")
+              f"{dec_icon} {spread['decision']}  [{signal}]  kronos:{k_dir}({k_pct:+.1f}%)")
         print(f"        Score: {spread['score']}{adj_note} | "
               f"ROI: {spread['roi']}% | PoP: {spread['pop']}%")
 
