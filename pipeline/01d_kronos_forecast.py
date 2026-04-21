@@ -144,11 +144,12 @@ def main():
             df.set_index("date", inplace=True)
             df = df[["open", "high", "low", "close", "volume"]].astype(float)
 
-            x_timestamp = df.index
+            # Kronos expects pd.Series, not DatetimeIndex — .dt accessor only works on Series
+            x_timestamp = pd.Series(df.index).reset_index(drop=True)
             last_date   = df.index[-1]
-            y_timestamp = pd.bdate_range(
-                start=last_date + timedelta(days=1), periods=5
-            )
+            y_timestamp = pd.Series(
+                pd.bdate_range(start=last_date + timedelta(days=1), periods=5)
+            ).reset_index(drop=True)
 
             input_df = df.reset_index(drop=True)
 
