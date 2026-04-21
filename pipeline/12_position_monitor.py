@@ -1,11 +1,13 @@
 """
 Step 12: Position Monitor
 Runs every 5 minutes during market hours. Checks all open
-positions against three exit rules:
+positions against four exit rules:
   1. Profit target  — close when spread value drops to 60% of
                       credit received (40% profit locked in)
-  2. Stop loss      — close when spread costs 2x the credit to close
-  3. Time stop      — hard close when DTE < 21 (past deadline)
+  2. Stop loss      — close when spread costs 1.5x the credit to close
+  3. Width hard cap — close if spread value exceeds 80% of max width
+                      (gap-through protection regardless of other rules)
+  4. Time stop      — hard close when DTE < 21 (past deadline)
                       on DTE = 21: hold through the day; after 3:30 PM ET
                       close only if spread is unfavorable (above credit)
 Sends a clear terminal alert and places the closing order
@@ -336,8 +338,8 @@ def check_positions():
                 remaining.append(pos)
             continue
 
-        # ── Rule 2: Stop loss (2x credit) ──────────────────────
-        stop = credit * pos["stop_loss_pct"]
+        # ── Rule 2: Stop loss (1.5x credit) ────────────────────
+        stop = credit * STOP_LOSS_MULT
         if current_value >= stop:
             print(f"  🛑 STOP LOSS triggered — "
                   f"spread at ${current_value:.2f} vs "
@@ -353,9 +355,29 @@ def check_positions():
                 remaining.append(pos)
             continue
 
+        # ── Rule 3b: Spread-width hard cap (gap-through protection) ──
+        spread_width = abs(pos["short_strike"] - pos["long_strike"])
+        width_cap    = round(spread_width * MAX_WIDTH_PCT, 2)
+        if current_value >= width_cap:
+            print(f"  🚨 WIDTH CAP triggered — "
+                  f"spread at ${current_value:.2f} ≥ "
+                  f"80% of width ${width_cap:.2f} "
+                  f"(width ${spread_width:.0f})")
+            try:
+                response = place_closing_order(pos, current_value)
+                profit   = log_closed_trade(
+                    pos, "width_cap", current_value, response)
+                print(f"  ✅ Closed at ${current_value:.2f} | "
+                      f"P&L: ${profit:.2f}")
+            except Exception as e:
+                print(f"  ❌ Close failed: {e}")
+                remaining.append(pos)
+            continue
+
         # ── No trigger — keep position open ───────────────────
         print(f"  ✓  Holding — profit target at "
-              f"${target:.2f} | stop at ${stop:.2f}")
+              f"${target:.2f} | stop at ${stop:.2f} | "
+              f"width cap at ${width_cap:.2f}")
         remaining.append(pos)
 
     # Save updated positions (closed ones removed)
@@ -364,6 +386,10 @@ def check_positions():
     if closed_count > 0:
         print(f"\n  📊 Closed {closed_count} position(s) this check")
 
+
+# ── Exit rule constants ────────────────────────────────────────────────────────
+STOP_LOSS_MULT  = 1.5   # close when spread costs 1.5x the credit to close
+MAX_WIDTH_PCT   = 0.80  # hard cap: close if spread value > 80% of max width
 
 # ── In-memory state for fluid stops (reset each monitor session) ──────────────
 # Trailing profit: tracks peak profit % seen so far per trade id
@@ -428,7 +454,8 @@ def run_monitor(interval_minutes=1):
     print(f"   Open positions in DB: {len(open_positions)}")
     print(f"   Exit rules:")
     print(f"     Profit target: 40% of max credit")
-    print(f"     Stop loss:     2x credit received")
+    print(f"     Stop loss:     {STOP_LOSS_MULT}x credit received")
+    print(f"     Width cap:     {int(MAX_WIDTH_PCT*100)}% of spread width (gap protection)")
     print(f"     Time stop:     hard close at DTE < 21")
     print(f"                    DTE = 21: EOD check after 3:30 PM")
     print("=" * 60)

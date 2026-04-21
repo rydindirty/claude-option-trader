@@ -275,7 +275,7 @@ def save_placed_trade(trade, contracts, order_response):
         "tradier_order_id":  order_response.get("order", {}).get("id", "unknown"),
         "opened_at":         datetime.now().isoformat(),
         "profit_target_pct": 0.40,
-        "stop_loss_pct":     2.00,
+        "stop_loss_pct":     1.50,
     }
 
     row_id = db.insert_open_trade(position)

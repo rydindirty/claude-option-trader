@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS trades (
     tradier_order_id    TEXT,
     opened_at           TEXT    NOT NULL,
     profit_target_pct   REAL    NOT NULL DEFAULT 0.40,
-    stop_loss_pct       REAL    NOT NULL DEFAULT 2.00,
+    stop_loss_pct       REAL    NOT NULL DEFAULT 1.50,
     -- Lifecycle
     status              TEXT    NOT NULL DEFAULT 'open',
     -- Close (populated when status = 'closed')

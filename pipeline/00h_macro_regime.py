@@ -288,6 +288,27 @@ def main():
     else:
         print("   VIX:          unavailable")
 
+    # ── VIX shock detection ─────────────────────────────────────────
+    # Hard threshold >30 OR single-day spike >20% → override to Contraction
+    vix_shock = False
+    vix_shock_reason = None
+    if vix_val is not None:
+        if vix_val > 30:
+            vix_shock = True
+            vix_shock_reason = f"VIX crossed hard threshold ({vix_val:.2f} > 30)"
+        elif vix_obs and len(vix_obs) >= 2:
+            prev_vix = float(vix_obs[1]["value"])
+            daily_pct = (vix_val - prev_vix) / prev_vix * 100
+            if daily_pct > 20:
+                vix_shock = True
+                vix_shock_reason = (
+                    f"VIX spiked {daily_pct:.1f}% in one day "
+                    f"({prev_vix:.2f} → {vix_val:.2f})"
+                )
+    if vix_shock:
+        print(f"\n🚨 VIX SHOCK: {vix_shock_reason}")
+        print(f"   → Overriding regime to CONTRACTION; Bull Put entries blocked")
+
     # ── Yield curve — 10Y minus 2Y Treasury spread (daily) ─────────
     t10y2y_obs = fetch_fred("T10Y2Y", limit=5)
     t10y2y_val, t10y2y_date = latest_value(t10y2y_obs)
@@ -337,6 +358,12 @@ def main():
         return
 
     regime, score, breakdown = classify_regime(indicators)
+
+    # VIX shock overrides regime to Contraction (unless already worse)
+    if vix_shock and regime not in ("contraction", "stagflation"):
+        print(f"   ⚠️  VIX shock override: {regime} → contraction")
+        regime = "contraction"
+
     cfg = REGIME_CONFIG[regime]
 
     print(f"\n📊 Score breakdown: {breakdown}  →  total: {score}")
@@ -361,7 +388,10 @@ def main():
             "enter_roi":            cfg["enter_roi"],
             "watch_pop":            cfg["watch_pop"],
             "watch_roi":            cfg["watch_roi"]
-        }
+        },
+        "vix_shock_override": vix_shock,
+        "vix_shock_reason":   vix_shock_reason,
+        "block_bull_puts":    vix_shock,
     }
 
     with open("data/macro_regime.json", "w") as f:

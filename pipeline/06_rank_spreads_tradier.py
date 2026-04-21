@@ -81,7 +81,9 @@ def load_macro_regime():
             "enter_roi":            adj.get("enter_roi", 20),
             "watch_pop":            adj.get("watch_pop", 70),
             "watch_roi":            adj.get("watch_roi", 15),
-            "regime_note":          data.get("regime_note", "")
+            "regime_note":          data.get("regime_note", ""),
+            "block_bull_puts":      data.get("block_bull_puts", False),
+            "vix_shock_reason":     data.get("vix_shock_reason"),
         }
     except FileNotFoundError:
         print("   ⚠️  macro_regime.json not found — using neutral defaults")
@@ -152,6 +154,8 @@ def rank_spreads():
     print(f"   Entry thresholds: PoP ≥ {regime['enter_pop']}% | ROI ≥ {regime['enter_roi']}%")
     if regime["regime_note"]:
         print(f"   {regime['regime_note']}")
+    if regime.get("block_bull_puts"):
+        print(f"\n🚨 VIX SHOCK — Bull Put entries BLOCKED: {regime.get('vix_shock_reason', '')}")
     print(f"\n📊 Technicals: {len(tech_map)} tickers | Peer z-scores: {len(peer_map)} tickers")
     kronos_status = "✅ active" if kronos_installed else "⚠️  neutral fallback"
     print(f"   Kronos: {kronos_status} ({len(kronos_map)} tickers)")
@@ -195,7 +199,10 @@ def rank_spreads():
         spread["kronos_forecast_pct"] = kronos_ticker.get("forecast_pct", 0.0)
 
         # Regime-adjusted ENTER / WATCH / SKIP thresholds
-        if spread["pop"] >= regime["enter_pop"] and spread["roi"] >= regime["enter_roi"]:
+        if regime.get("block_bull_puts") and spread_type == "Bull Put":
+            spread["decision"] = "SKIP"
+            spread["skip_reason"] = "VIX shock — Bull Put entries blocked"
+        elif spread["pop"] >= regime["enter_pop"] and spread["roi"] >= regime["enter_roi"]:
             spread["decision"] = "ENTER"
         elif spread["pop"] >= regime["watch_pop"] and spread["roi"] >= regime["watch_roi"]:
             spread["decision"] = "WATCH"
