@@ -25,19 +25,23 @@ def analyze_news_sentiment():
     print(f"\nAnalyzing {len(stocks_with_news)} stocks for risk...")
 
     # Build the analysis prompt
-    prompt = """Analyze these stocks for HIGH RISK indicators that make them bad for credit spreads (15-45 days).
+    prompt = """You are screening stocks for credit spread suitability. Our spreads have a 21-45 day hold window.
 
-REMOVE stocks with:
-- Earnings in next 45 days
-- FDA decisions pending
-- Merger/acquisition rumors
-- Major lawsuits or regulatory action
-- Severe negative sentiment spike
+REMOVE only if a headline explicitly confirms a known catalyst WITHIN THE NEXT 21 DAYS:
+- Confirmed earnings date within 21 days (e.g. "reports Q1 earnings on May 3")
+- FDA binary decision explicitly scheduled within 21 days
+- Confirmed merger vote or close date within 21 days
 
-KEEP stocks with:
-- Normal business news
-- Stable or improving sentiment
-- No major catalysts upcoming
+DO NOT REMOVE for:
+- General earnings discussion, analyst estimates, or past earnings recaps
+- Sector headwinds, macro concerns, or industry trends
+- Analyst upgrades/downgrades or price target changes
+- AI/tech investment themes or competitive positioning
+- Layoffs, restructuring, or cost-cutting (unless tied to a specific catalyst date)
+- High volatility or momentum coverage
+- Anything you are uncertain about — DEFAULT TO KEEP
+
+When in doubt, KEEP the stock. A false removal hurts us more than a false keep (we have other downstream filters).
 
 STOCKS & NEWS:
 
@@ -55,8 +59,8 @@ OUTPUT JSON ONLY - no explanation, no markdown fences:
 {
   "keep": ["TICKER1", "TICKER2"],
   "remove": {
-    "TICKER3": "earnings in 12 days",
-    "TICKER4": "merger rumors"
+    "TICKER3": "confirmed earnings May 3 (8 days)",
+    "TICKER4": "FDA decision May 5 (10 days)"
   }
 }
 """
