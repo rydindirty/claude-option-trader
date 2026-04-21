@@ -110,13 +110,19 @@ def calculate_spreads():
                     
                     net_credit = short_bid - long_ask
                     width = short_strike["strike"] - long_strike["strike"]
-                    
-                    if net_credit <= 0.10 or width <= 0:
+
+                    if net_credit <= 0 or width <= 0:
                         continue
-                    
+
+                    # Require credit ≥ 25% of width — ensures meaningful buffer
+                    # before the 1.5x stop (e.g. $2 spread needs ≥ $0.50 credit)
+                    credit_pct = net_credit / width
+                    if credit_pct < 0.25:
+                        continue
+
                     max_loss = width - net_credit
                     roi = (net_credit / max_loss) * 100
-                    
+
                     pop = black_scholes_pop(
                         stock_price,
                         short_strike["strike"],
@@ -125,7 +131,7 @@ def calculate_spreads():
                         is_call=False,
                         delta=short_strike["put_greeks"]["delta"]
                     )
-                    
+
                     if roi >= 5 and roi <= 50 and pop >= 70:
                         spread = {
                             "ticker": ticker,
@@ -135,6 +141,7 @@ def calculate_spreads():
                             "long_strike": long_strike["strike"],
                             "width": round(width, 2),
                             "net_credit": round(net_credit, 2),
+                            "credit_pct": round(credit_pct * 100, 1),
                             "max_loss": round(max_loss, 2),
                             "roi": round(roi, 1),
                             "pop": round(pop, 1),
@@ -167,13 +174,18 @@ def calculate_spreads():
                     
                     net_credit = short_bid - long_ask
                     width = long_strike["strike"] - short_strike["strike"]
-                    
-                    if net_credit <= 0.10 or width <= 0:
+
+                    if net_credit <= 0 or width <= 0:
                         continue
-                    
+
+                    # Require credit ≥ 25% of width — same rule as Bull Puts
+                    credit_pct = net_credit / width
+                    if credit_pct < 0.25:
+                        continue
+
                     max_loss = width - net_credit
                     roi = (net_credit / max_loss) * 100
-                    
+
                     pop = black_scholes_pop(
                         stock_price,
                         short_strike["strike"],
@@ -182,7 +194,7 @@ def calculate_spreads():
                         is_call=True,
                         delta=short_strike["call_greeks"]["delta"]
                     )
-                    
+
                     if roi >= 5 and roi <= 50 and pop >= 70:
                         spread = {
                             "ticker": ticker,
@@ -192,6 +204,7 @@ def calculate_spreads():
                             "long_strike": long_strike["strike"],
                             "width": round(width, 2),
                             "net_credit": round(net_credit, 2),
+                            "credit_pct": round(credit_pct * 100, 1),
                             "max_loss": round(max_loss, 2),
                             "roi": round(roi, 1),
                             "pop": round(pop, 1),

@@ -354,8 +354,8 @@ def main():
         print(f"  ─────────────────────────────────────────────")
         print(f"  Profit Target (40%): close when spread = "
               f"${credit * 0.60:.2f}")
-        print(f"  Stop Loss (2x):      close when spread = "
-              f"${credit * 2:.2f}")
+        print(f"  Stop Loss (1.5x):    close when spread = "
+              f"${credit * 1.5:.2f}")
         print()
 
         # Suggest contract count based on remaining buying power
