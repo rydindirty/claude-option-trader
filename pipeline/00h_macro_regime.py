@@ -26,7 +26,10 @@ Output: data/macro_regime.json
     06_rank_spreads_tradier.py  — score multipliers + entry thresholds
     08_claude_analysis.py       — macro context injected into Claude prompt
 
-Falls back to Neutral regime silently if FRED key is missing or API fails.
+Cache: data/fred_cache.json — last successful fetch per series.
+  On FRED API failure (500, timeout, etc.) uses cached values instead of
+  dropping to zero indicators. Falls back to Neutral only if both live
+  fetch and cache are unavailable.
 """
 import os
 import sys
@@ -37,7 +40,26 @@ from datetime import datetime, date
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import FRED_API_KEY
 
-FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
+FRED_BASE       = "https://api.stlouisfed.org/fred/series/observations"
+FRED_CACHE_PATH = "data/fred_cache.json"
+
+
+def _load_fred_cache():
+    try:
+        with open(FRED_CACHE_PATH, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_fred_cache_entry(series_id, observations):
+    cache = _load_fred_cache()
+    cache[series_id] = {
+        "cached_at":    datetime.now().isoformat(),
+        "observations": observations,
+    }
+    with open(FRED_CACHE_PATH, "w") as f:
+        json.dump(cache, f, indent=2)
 
 # ── Regime configuration ────────────────────────────────────────────────────
 # Each entry defines score multipliers applied to Bull Put / Bear Call scores
@@ -119,7 +141,10 @@ REGIME_CONFIG = {
 def fetch_fred(series_id, limit=13):
     """
     Fetch the N most recent observations for a FRED series.
-    Returns a list of {date, value} dicts (most recent first), or None on error.
+    On success, writes results to fred_cache.json.
+    On failure, returns last-known cached data rather than None.
+    Returns a list of {date, value} dicts (most recent first), or None if
+    both the API and cache are unavailable.
     """
     try:
         r = requests.get(
@@ -135,10 +160,17 @@ def fetch_fred(series_id, limit=13):
             timeout=10
         )
         r.raise_for_status()
-        obs = r.json().get("observations", [])
-        return [o for o in obs if o.get("value") not in (".", "", None)]
+        obs = [o for o in r.json().get("observations", [])
+               if o.get("value") not in (".", "", None)]
+        _save_fred_cache_entry(series_id, obs)
+        return obs
     except Exception as e:
         print(f"   ⚠️  FRED fetch failed ({series_id}): {e}")
+        cache = _load_fred_cache()
+        if series_id in cache:
+            cached_at = cache[series_id].get("cached_at", "unknown")
+            print(f"   ↩️  Using cached {series_id} data from {cached_at}")
+            return cache[series_id]["observations"]
         return None
 
 
