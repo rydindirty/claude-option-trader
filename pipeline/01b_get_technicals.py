@@ -12,7 +12,7 @@ Each ticker receives a technical_signal derived from a 5-point scoring rubric:
 
   SMA200 alignment (+2 / -2) — primary trend, highest weight
   SMA50  alignment (+1 / -1) — medium-term trend
-  RSI    level     (+1 / -1) — momentum health
+  RSI    level     (+1 / -1) — momentum health (45–70 → +1; >75 or <30 → -1)
   %B     position  (+1 / -1) — position in volatility band
 
   Score ≥  3 → strong_bullish  (Bull Put ×1.15 | Bear Call ×0.85 in step 06)
@@ -38,8 +38,9 @@ from config import TRADIER_TOKEN, TRADIER_ENV, get_tradier_session, TRADIER_BASE
 
 _session = get_tradier_session()
 
-# Number of calendar days of history to request (covers ~200 trading days)
-HISTORY_DAYS = 300
+# Number of calendar days of history to request.
+# 400 calendar days ≈ 275 trading days — gives a 75-day buffer above SMA200.
+HISTORY_DAYS = 400
 
 # Technical multipliers — consumed by step 06
 TECH_MULTIPLIERS = {
@@ -134,9 +135,9 @@ def score_signal(price, rsi, sma50, sma200, bb_pct):
         breakdown["sma50"] = pts
 
     if rsi is not None:
-        if 50 <= rsi <= 65:
+        if 45 <= rsi <= 70:   # healthy momentum — not oversold, not overbought
             pts = 1
-        elif rsi > 70 or rsi < 35:
+        elif rsi > 75 or rsi < 30:   # extreme overbought or deeply oversold
             pts = -1
         else:
             pts = 0

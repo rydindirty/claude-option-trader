@@ -61,8 +61,8 @@ _NEUTRAL = {
     "bear_call_multiplier": 1.0,
     "enter_pop":            70,
     "enter_roi":            20,
-    "watch_pop":            65,
-    "watch_roi":            30,
+    "watch_pop":            70,   # PoP floor is 70% — WATCH catches ROI 15–19%, near ENTER
+    "watch_roi":            15,
     "regime_note":          ""
 }
 
@@ -79,8 +79,8 @@ def load_macro_regime():
             "bear_call_multiplier": adj.get("bear_call_multiplier", 1.0),
             "enter_pop":            adj.get("enter_pop", 70),
             "enter_roi":            adj.get("enter_roi", 20),
-            "watch_pop":            adj.get("watch_pop", 65),
-            "watch_roi":            adj.get("watch_roi", 30),
+            "watch_pop":            adj.get("watch_pop", 70),
+            "watch_roi":            adj.get("watch_roi", 15),
             "regime_note":          data.get("regime_note", "")
         }
     except FileNotFoundError:
