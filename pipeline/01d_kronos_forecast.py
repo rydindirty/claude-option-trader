@@ -96,7 +96,7 @@ def main():
         print(f"\n⚠️  Kronos not available: {_IMPORT_ERR}")
         print("\n   One-time setup:")
         print(f"   git clone https://github.com/shiyu-coder/Kronos {KRONOS_DIR}")
-        print("   pip install torch transformers huggingface_hub pandas")
+        print("   pip install torch transformers huggingface_hub pandas einops safetensors tqdm")
         print("\n   Writing neutral signals (×1.00) — pipeline continues normally.")
         _write_neutral_signals(tickers, installed=False)
         print("\n✅ Step 01D complete (Kronos not installed — neutral signals)")
