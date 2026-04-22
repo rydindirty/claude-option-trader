@@ -184,13 +184,23 @@ NEWS (last 3 days):
 
     prompt += """
 
-REQUIRED OUTPUT:
+REQUIRED OUTPUT FORMAT — follow this exactly, no deviations:
 
-For each trade:
+CRITICAL FORMAT RULES:
+- Start each trade with "#N. TICKER TYPE STRIKES" — number, period, space, then ticker
+- No markdown headers (no ##), no "TRADE" prefix, no bold (**) around the header
+- Put the recommendation keyword (Trade / Wait / Skip) on its own line after "RECOMMENDATION:"
+- Analyze only the trades provided; do not mention any missing trades
 
-#1. [TICKER] [TYPE] [STRIKES]
+Example of correct header:
+#1. GOOGL Bull Put $320/$315
+   DTE: 23 | ROI: 37.0% | PoP: 70.5% | HEAT: 4
+
+For each trade use this exact structure:
+
+#N. [TICKER] [TYPE] [STRIKES]
    DTE: [X] | ROI: [X%] | PoP: [X%] | HEAT: [1-10]
-   
+
    5W1H ANALYSIS:
    • WHO: Key entities/players
    • WHAT: Main events/developments
@@ -198,14 +208,27 @@ For each trade:
    • WHERE: Geographic/market context
    • WHY: Underlying reasons/causes
    • HOW: Impact on price/volatility
-   
-   CATALYST RISK:
-   [Specific upcoming events within DTE]
-   
-   RECOMMENDATION:
-   [Trade / Wait / Skip - with reason]
 
-Continue through all 9 trades. Be specific with dates and events.
+   CATALYST RISK:
+   [Only confirmed upcoming events with a specific date within DTE — e.g. earnings date,
+   FDA decision date, confirmed merger vote. Write "None identified" if nothing specific.]
+
+   RECOMMENDATION:
+   Trade
+   [Reason]
+
+   (or Wait / Skip — see rules below)
+
+RECOMMENDATION RULES — apply these strictly:
+- DEFAULT IS TRADE. Recommend Trade unless a specific rule below forces Wait or Skip.
+- SKIP only when: (a) confirmed earnings date falls within DTE, OR (b) confirmed FDA/regulatory
+  binary decision within DTE, OR (c) quant decision is SKIP with no overriding news catalyst.
+- WAIT only when: a specific dated event within DTE creates meaningful uncertainty (e.g.
+  "earnings confirmed for May 3") but the quant signal is still ENTER or WATCH.
+- DO NOT Skip or Wait for: ongoing sector competition, analyst ratings, general market themes,
+  leadership changes, past earnings, macro uncertainty, or any risk without a specific date.
+- A HEAT score of 7-10 alone does not justify Wait or Skip — it is informational only.
+- If quant says ENTER and no dated catalyst exists within DTE, the answer is Trade.
 """
     return prompt
 

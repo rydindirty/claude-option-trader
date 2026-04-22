@@ -114,10 +114,17 @@ def calculate_spreads():
                     if net_credit <= 0 or width <= 0:
                         continue
 
-                    # Require credit ≥ 25% of width — ensures meaningful buffer
-                    # before the 1.5x stop (e.g. $2 spread needs ≥ $0.50 credit)
-                    credit_pct = net_credit / width
-                    if credit_pct < 0.25:
+                    # Cap spread width at $25 — anything wider is impractical
+                    # (excess margin, outsized loss per contract) and is only
+                    # reached by pairing distant OTM legs with tiny premiums.
+                    if width > 25:
+                        continue
+
+                    # Require minimum absolute credit of $0.60.
+                    # At 1.5x stop this guarantees a $0.30 buffer above entry —
+                    # enough to clear normal bid-ask noise on either leg.
+                    credit_pct = net_credit / width  # stored for display/ranking
+                    if net_credit < 0.60:
                         continue
 
                     max_loss = width - net_credit
@@ -132,7 +139,7 @@ def calculate_spreads():
                         delta=short_strike["put_greeks"]["delta"]
                     )
 
-                    if roi >= 5 and roi <= 50 and pop >= 70:
+                    if roi >= 5 and roi <= 50 and pop >= 68:
                         spread = {
                             "ticker": ticker,
                             "type": "Bull Put",
@@ -178,9 +185,12 @@ def calculate_spreads():
                     if net_credit <= 0 or width <= 0:
                         continue
 
-                    # Require credit ≥ 25% of width — same rule as Bull Puts
-                    credit_pct = net_credit / width
-                    if credit_pct < 0.25:
+                    # Same $25 max width and $0.60 min credit rules as Bull Puts
+                    if width > 25:
+                        continue
+
+                    credit_pct = net_credit / width  # stored for display/ranking
+                    if net_credit < 0.60:
                         continue
 
                     max_loss = width - net_credit
@@ -195,7 +205,7 @@ def calculate_spreads():
                         delta=short_strike["call_greeks"]["delta"]
                     )
 
-                    if roi >= 5 and roi <= 50 and pop >= 70:
+                    if roi >= 5 and roi <= 50 and pop >= 68:
                         spread = {
                             "ticker": ticker,
                             "type": "Bear Call",

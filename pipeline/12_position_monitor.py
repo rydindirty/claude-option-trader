@@ -459,7 +459,9 @@ def run_monitor(interval_minutes=1):
     print(f"     Time stop:     hard close at DTE < 21")
     print(f"                    DTE = 21: EOD check after 3:30 PM")
     print("=" * 60)
-    print("\nPress Ctrl+C to stop\n")
+    print("\nPress Ctrl+C to stop")
+    print("To manually close a position: open a new terminal and run:")
+    print("  python3 pipeline/12_position_monitor.py --close\n")
 
     try:
         while True:
@@ -484,11 +486,85 @@ def run_monitor(interval_minutes=1):
         release_lock()
 
 
+def manual_close():
+    """
+    Interactive manual close — run in a separate terminal while the monitor
+    is active. Lists open positions, prompts for selection, fetches live
+    price, requires confirmation, then places a closing order.
+    """
+    positions = load_positions()
+    if not positions:
+        print("No open positions found.")
+        return
+
+    today = date.today()
+    print("\n" + "=" * 60)
+    print("MANUAL POSITION CLOSE")
+    print("=" * 60)
+    for i, pos in enumerate(positions, start=1):
+        dte = (date.fromisoformat(pos["expiration"]) - today).days
+        print(f"  [{i}] {pos['ticker']} {pos['type']}  "
+              f"${pos['short_strike']:.0f}/${pos['long_strike']:.0f}  "
+              f"Exp {pos['expiration']}  DTE {dte}  "
+              f"Credit ${pos['credit_received']:.2f}  "
+              f"Contracts {pos['contracts']}")
+    print(f"  [0] Cancel")
+    print()
+
+    try:
+        choice = int(input("Select position to close: ").strip())
+    except (ValueError, EOFError):
+        print("Invalid input — aborting.")
+        return
+
+    if choice == 0:
+        print("Cancelled.")
+        return
+    if choice < 1 or choice > len(positions):
+        print("Invalid selection — aborting.")
+        return
+
+    pos = positions[choice - 1]
+    ticker = pos["ticker"]
+    credit = pos["credit_received"]
+
+    print(f"\nFetching live price for {ticker} spread...")
+    current_value = get_spread_value(pos["short_symbol"], pos["long_symbol"])
+
+    if current_value is None:
+        print("❌ Could not fetch live price — aborting.")
+        return
+
+    profit_pct = (credit - current_value) / credit * 100
+    print(f"\n  Position : {ticker} {pos['type']} "
+          f"${pos['short_strike']:.0f}/${pos['long_strike']:.0f}")
+    print(f"  Credit   : ${credit:.2f}")
+    print(f"  Close at : ${current_value:.2f}  ({profit_pct:+.1f}% P&L)")
+    print(f"  Contracts: {pos['contracts']}")
+    est_profit = round((credit - current_value) * pos["contracts"] * 100, 2)
+    print(f"  Est. P&L : ${est_profit:+.2f}")
+    print()
+
+    confirm = input("Confirm manual close? (yes/no): ").strip().lower()
+    if confirm != "yes":
+        print("Cancelled.")
+        return
+
+    try:
+        response = place_closing_order(pos, current_value)
+        profit = log_closed_trade(pos, "manual_close", current_value, response)
+        order_id = response.get("order", {}).get("id", "unknown")
+        print(f"\n✅ Closing order placed — Order ID: {order_id}")
+        print(f"   Closed at ${current_value:.2f} | P&L: ${profit:.2f}")
+    except Exception as e:
+        print(f"\n❌ Close failed: {e}")
+
+
 if __name__ == "__main__":
-    # Can also run a single check with:
-    # python3 pipeline/12_position_monitor.py --once
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "--once":
         check_positions()
+    elif len(sys.argv) > 1 and sys.argv[1] == "--close":
+        manual_close()
     else:
         run_monitor(interval_minutes=1)

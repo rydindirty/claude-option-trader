@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS trades (
     opened_at           TEXT    NOT NULL,
     profit_target_pct   REAL    NOT NULL DEFAULT 0.40,
     stop_loss_pct       REAL    NOT NULL DEFAULT 1.50,
+    regime              TEXT,
     -- Lifecycle
     status              TEXT    NOT NULL DEFAULT 'open',
     -- Close (populated when status = 'closed')
@@ -47,6 +48,10 @@ CREATE TABLE IF NOT EXISTS trades (
 )
 """
 
+_MIGRATIONS = [
+    "ALTER TABLE trades ADD COLUMN regime TEXT",
+]
+
 
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -55,10 +60,15 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def init_db():
-    """Create the trades table if it doesn't exist yet."""
+    """Create the trades table if it doesn't exist yet, then run migrations."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = _get_conn()
     conn.execute(_CREATE_TABLE)
+    for sql in _MIGRATIONS:
+        try:
+            conn.execute(sql)
+        except Exception:
+            pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -77,15 +87,15 @@ def insert_open_trade(position: dict) -> int:
             ticker, type, short_strike, long_strike, expiration,
             dte_at_entry, credit_received, max_profit, max_loss,
             contracts, short_symbol, long_symbol, tradier_order_id,
-            opened_at, profit_target_pct, stop_loss_pct, status
+            opened_at, profit_target_pct, stop_loss_pct, regime, status
         ) VALUES (
             :ticker, :type, :short_strike, :long_strike, :expiration,
             :dte_at_entry, :credit_received, :max_profit, :max_loss,
             :contracts, :short_symbol, :long_symbol, :tradier_order_id,
-            :opened_at, :profit_target_pct, :stop_loss_pct, 'open'
+            :opened_at, :profit_target_pct, :stop_loss_pct, :regime, 'open'
         )
         """,
-        position,
+        {**position, "regime": position.get("regime")},
     )
     conn.commit()
     row_id = cur.lastrowid
