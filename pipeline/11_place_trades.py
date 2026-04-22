@@ -75,10 +75,12 @@ def load_data():
             analysis = json.load(f)["analysis"]
 
         import re
-        # Normalize both header formats to ## # style:
-        # Format A: "## #1. TICKER ..."
-        # Format B: "**#1. TICKER ..."
-        normalized = re.sub(r"\*\*#(\d+)\.", r"## #\1.", analysis)
+        # Normalize all known header formats to "## #N." style:
+        # Format A: "## #1. TICKER ..."       (expected)
+        # Format B: "**#1. TICKER ..."        (bold variant)
+        # Format C: "## TRADE #1: TICKER ..." (Claude markdown variant)
+        normalized = re.sub(r"##\s*TRADE\s*#(\d+)[:\.]", r"## #\1.", analysis)
+        normalized = re.sub(r"\*\*#(\d+)\.", r"## #\1.", normalized)
 
         sections = normalized.split("## #")
         for section in sections[1:]:

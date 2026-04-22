@@ -11,19 +11,26 @@ def load_data():
 
 def parse_trades(analysis_text):
     trades = []
-    trade_blocks = re.split(r'#\d+\.', analysis_text)[1:]
-    
-    for i, block in enumerate(trade_blocks, 1):
+    # Normalize Claude's markdown header variants to the expected "#N." format:
+    # "## TRADE #1: ..."  →  "#1. ..."
+    # "**#1. ..."         →  "#1. ..."
+    normalized = re.sub(r'##\s*(?:TRADE\s*)?#(\d+)[:\.]', r'#\1.', analysis_text)
+    normalized = re.sub(r'\*\*#(\d+)\.', r'#\1.', normalized)
+    trade_blocks = re.split(r'(?m)^#(\d+)\.', normalized)
+    # split returns [pre, num1, block1, num2, block2, ...] — take blocks only
+    blocks_only = trade_blocks[2::2] if len(trade_blocks) > 2 else trade_blocks[1:]
+
+    for i, block in enumerate(blocks_only, 1):
         lines = block.strip().split('\n')
         if not lines:
             continue
-        
+
         header = lines[0].strip()
         parts = header.split()
-        
+
         if len(parts) < 3:
             continue
-            
+
         ticker = parts[0]
         trade_type = ' '.join(parts[1:-1])
         strikes = parts[-1]
@@ -55,12 +62,17 @@ def parse_trades(analysis_text):
             if len(words) > 33:
                 catalyst = ' '.join(words[:33]) + "..."
         
-        rec_line = next((l for l in lines if 'RECOMMENDATION:' in l), '')
+        rec_line = next((l for l in lines if 'RECOMMENDATION:' in l.upper()), '')
         recommendation = "Pending"
         if rec_line:
-            rec_idx = lines.index(rec_line)
-            if rec_idx + 1 < len(lines):
-                recommendation = lines[rec_idx + 1].strip()
+            clean_rec = rec_line.replace("*", "").strip()
+            after_colon = clean_rec.split(":", 1)[1].strip() if ":" in clean_rec else ""
+            if after_colon:
+                recommendation = after_colon
+            else:
+                rec_idx = lines.index(rec_line)
+                if rec_idx + 1 < len(lines):
+                    recommendation = lines[rec_idx + 1].strip().replace("*", "")
         
         trades.append({
             'rank': i,
