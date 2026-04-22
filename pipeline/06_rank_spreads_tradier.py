@@ -59,9 +59,9 @@ _NEUTRAL = {
     "preferred_type":       None,
     "bull_put_multiplier":  1.0,
     "bear_call_multiplier": 1.0,
-    "enter_pop":            70,
+    "enter_pop":            68,
     "enter_roi":            20,
-    "watch_pop":            70,   # PoP floor is 70% — WATCH catches ROI 15–19%, near ENTER
+    "watch_pop":            68,   # PoP floor is 68% — WATCH catches ROI 15–19%, near ENTER
     "watch_roi":            15,
     "regime_note":          ""
 }
