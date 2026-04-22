@@ -210,15 +210,25 @@ For each trade use this exact structure:
    • HOW: Impact on price/volatility
 
    CATALYST RISK:
-   [Specific upcoming events within DTE]
+   [Only confirmed upcoming events with a specific date within DTE — e.g. earnings date,
+   FDA decision date, confirmed merger vote. Write "None identified" if nothing specific.]
 
    RECOMMENDATION:
    Trade
    [Reason]
 
-   (or Wait / Skip with reason)
+   (or Wait / Skip — see rules below)
 
-Be specific with dates and events.
+RECOMMENDATION RULES — apply these strictly:
+- DEFAULT IS TRADE. Recommend Trade unless a specific rule below forces Wait or Skip.
+- SKIP only when: (a) confirmed earnings date falls within DTE, OR (b) confirmed FDA/regulatory
+  binary decision within DTE, OR (c) quant decision is SKIP with no overriding news catalyst.
+- WAIT only when: a specific dated event within DTE creates meaningful uncertainty (e.g.
+  "earnings confirmed for May 3") but the quant signal is still ENTER or WATCH.
+- DO NOT Skip or Wait for: ongoing sector competition, analyst ratings, general market themes,
+  leadership changes, past earnings, macro uncertainty, or any risk without a specific date.
+- A HEAT score of 7-10 alone does not justify Wait or Skip — it is informational only.
+- If quant says ENTER and no dated catalyst exists within DTE, the answer is Trade.
 """
     return prompt
 
