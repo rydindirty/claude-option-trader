@@ -76,11 +76,14 @@ def load_data():
 
         import re
         # Normalize all known header formats to "## #N." style:
-        # Format A: "## #1. TICKER ..."       (expected)
-        # Format B: "**#1. TICKER ..."        (bold variant)
-        # Format C: "## TRADE #1: TICKER ..." (Claude markdown variant)
+        # Format A: "## #1. TICKER ..."       (already correct — no-op)
+        # Format B: "#1. TICKER ..."          (plain, no ## prefix — current prompt output)
+        # Format C: "**#1. TICKER ..."        (bold variant)
+        # Format D: "## TRADE #1: TICKER ..." (Claude markdown variant)
         normalized = re.sub(r"##\s*TRADE\s*#(\d+)[:\.]", r"## #\1.", analysis)
         normalized = re.sub(r"\*\*#(\d+)\.", r"## #\1.", normalized)
+        # Must run last: convert plain "#N." at line start (not already "## #N.")
+        normalized = re.sub(r"(?m)^#(\d+)\.", r"## #\1.", normalized)
 
         sections = normalized.split("## #")
         for section in sections[1:]:
