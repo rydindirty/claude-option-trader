@@ -62,6 +62,55 @@ def suggest_contracts(max_loss_per_contract, buying_power, risk_pct=0.60):
     return max(1, int(budget / max_loss_dollars))
 
 
+def _parse_analysis(analysis_text, tickers):
+    """
+    Ticker-keyed extraction of RECOMMENDATION and HEAT from Claude's analysis.
+    Scans line-by-line, detecting section starts by finding a known ticker
+    near a section number — independent of header formatting (##, **, plain, etc.).
+    """
+    import re
+    ticker_set = {t.upper() for t in tickers}
+    recommendations = {}
+    heat_scores = {}
+    current_ticker = None
+
+    for line in analysis_text.split("\n"):
+        stripped = line.strip()
+        # Strip markdown noise to get plain tokens, then check if this line
+        # is a numbered section header containing a known ticker.
+        # All observed formats share: a digit (section number) near the ticker.
+        plain_tokens = re.sub(r"[#*`_]+", " ", stripped).split()
+        has_digit = any(re.search(r"\d", t) for t in plain_tokens[:3])
+        if has_digit:
+            for tok in plain_tokens[:5]:
+                candidate = re.sub(r"[^A-Z]", "", tok.upper())
+                if candidate in ticker_set:
+                    current_ticker = candidate
+                    break
+
+        if current_ticker is None:
+            continue
+
+        upper = stripped.upper()
+
+        if "RECOMMENDATION:" in upper and current_ticker not in recommendations:
+            after = upper.split("RECOMMENDATION:", 1)[1].strip().lstrip("* ")
+            for kw in ("TRADE", "WAIT", "SKIP"):
+                if after.startswith(kw):
+                    recommendations[current_ticker] = kw
+                    break
+
+        if "HEAT:" in upper and current_ticker not in heat_scores:
+            try:
+                after = upper.split("HEAT:", 1)[1].strip().lstrip("* |")
+                heat_str = re.sub(r"[^0-9].*", "", after.split()[0])
+                heat_scores[current_ticker] = int(heat_str)
+            except (ValueError, IndexError):
+                pass
+
+    return recommendations, heat_scores
+
+
 def load_data():
     """Load trade recommendations and Claude analysis."""
     with open("data/report_table.json", "r") as f:
@@ -74,57 +123,8 @@ def load_data():
         with open("data/top9_analysis.json", "r") as f:
             analysis = json.load(f)["analysis"]
 
-        import re
-        # Normalize all known header formats to "## #N." style:
-        # Format A: "## #1. TICKER ..."       (already correct — no-op)
-        # Format B: "#1. TICKER ..."          (plain, no ## prefix — current prompt output)
-        # Format C: "**#1. TICKER ..."        (bold variant)
-        # Format D: "## TRADE #1: TICKER ..." (Claude markdown variant)
-        normalized = re.sub(r"##\s*TRADE\s*#(\d+)[:\.]", r"## #\1.", analysis)
-        normalized = re.sub(r"\*\*#(\d+)\.", r"## #\1.", normalized)
-        # Must run last: convert plain "#N." at line start (not already "## #N.")
-        normalized = re.sub(r"(?m)^#(\d+)\.", r"## #\1.", normalized)
-
-        sections = normalized.split("## #")
-        for section in sections[1:]:
-            sec_lines = section.strip().split("\n")
-
-            # First line: "1. TICKER TYPE STRIKES"
-            first_line = sec_lines[0].strip().replace("**", "").strip()
-            parts = first_line.split()
-            if len(parts) < 2:
-                continue
-            ticker = parts[1].upper()
-
-            # Find HEAT score on line containing HEAT:
-            for line in sec_lines:
-                if "HEAT:" in line.upper():
-                    try:
-                        heat_part = line.upper().split("HEAT:")[1]
-                        heat_str = heat_part.strip().replace("*","").replace("|","").strip().split()[0]
-                        heat_scores[ticker] = int(heat_str)
-                    except (ValueError, IndexError):
-                        pass
-                    break
-
-            # Find recommendation line — handles both formats:
-            # Direct:  "TRADE ..." / "WAIT ..." / "SKIP ..."
-            # Labeled: "RECOMMENDATION: TRADE ..." (Claude's typical output)
-            for line in sec_lines:
-                clean = line.strip().replace("*", "").strip()
-                # Normalize "RECOMMENDATION: TRADE" → just check the value after the colon
-                check = clean
-                if clean.upper().startswith("RECOMMENDATION:"):
-                    check = clean.split(":", 1)[1].strip()
-                if check.upper().startswith("TRADE"):
-                    recommendations[ticker] = "TRADE"
-                    break
-                elif check.upper().startswith("WAIT"):
-                    recommendations[ticker] = "WAIT"
-                    break
-                elif check.upper().startswith("SKIP"):
-                    recommendations[ticker] = "SKIP"
-                    break
+        tickers = [t["ticker"].upper() for t in trades]
+        recommendations, heat_scores = _parse_analysis(analysis, tickers)
 
     except Exception as e:
         print(f"⚠️  Could not parse recommendations: {e}")
