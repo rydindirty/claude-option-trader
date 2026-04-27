@@ -8,21 +8,86 @@ import re
 import sys
 from datetime import datetime, date
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Form, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
+from starlette.middleware.sessions import SessionMiddleware
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)                                 # config.py
 sys.path.insert(0, os.path.join(BASE_DIR, "pipeline"))       # db.py
 
 from config import (TRADIER_TOKEN, TRADIER_ENV, get_tradier_session,
-                    TRADIER_BASE_URL, TRADIER_HEADERS, TRADIER_ACCOUNT_ID)
+                    TRADIER_BASE_URL, TRADIER_HEADERS, TRADIER_ACCOUNT_ID,
+                    WEB_USERNAME, WEB_PASSWORD, SESSION_SECRET)
 import db
 
 _session = get_tradier_session()
 
 app = FastAPI(title="News Spread Engine", docs_url=None, redoc_url=None)
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+
+
+# ── Auth helpers ───────────────────────────────────────────────────────
+
+def _is_authenticated(request: Request) -> bool:
+    return request.session.get("authenticated") is True
+
+def _require_auth(request: Request):
+    if not _is_authenticated(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+_LOGIN_PAGE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>News Spread Engine — Login</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d0d0d; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont,
+      'Segoe UI', sans-serif; display: flex; align-items: center;
+      justify-content: center; min-height: 100vh;
+    }
+    .card {
+      background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 12px;
+      padding: 2.5rem; width: 100%; max-width: 380px;
+    }
+    .logo { font-size: 1.5rem; font-weight: 700; margin-bottom: 1.8rem; text-align: center; }
+    .logo span { color: #00c853; }
+    label { display: block; font-size: 0.75rem; color: #888; text-transform: uppercase;
+            letter-spacing: .06em; margin-bottom: .4rem; }
+    input {
+      width: 100%; background: #111; border: 1px solid #333; border-radius: 8px;
+      color: #e0e0e0; font-size: 1rem; padding: .7rem 1rem; margin-bottom: 1.2rem;
+      outline: none;
+    }
+    input:focus { border-color: #00c853; }
+    button {
+      width: 100%; background: #00c853; color: #000; font-weight: 700;
+      font-size: 1rem; padding: .8rem; border: none; border-radius: 8px; cursor: pointer;
+    }
+    button:hover { background: #00e676; }
+    .error { color: #ff5252; font-size: .875rem; margin-bottom: 1rem; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo"><span>News</span>Spread</div>
+    {error}
+    <form method="post" action="/login">
+      <label>Username</label>
+      <input type="text" name="username" autocomplete="username" autofocus/>
+      <label>Password</label>
+      <input type="password" name="password" autocomplete="current-password"/>
+      <button type="submit">Sign In</button>
+    </form>
+  </div>
+</body>
+</html>
+"""
 
 
 # ── Data helpers ───────────────────────────────────────────────────────
@@ -278,19 +343,46 @@ def close_position(position, current_value):
 
 # ── API routes ─────────────────────────────────────────────────────────
 
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    if _is_authenticated(request):
+        return RedirectResponse("/portfolio")
+    return HTMLResponse(_LOGIN_PAGE.format(error=""))
+
+
+@app.post("/login", response_class=HTMLResponse)
+async def login_post(request: Request, username: str = Form(...), password: str = Form(...)):
+    if username == WEB_USERNAME and password == WEB_PASSWORD:
+        request.session["authenticated"] = True
+        return RedirectResponse("/portfolio", status_code=303)
+    return HTMLResponse(_LOGIN_PAGE.format(
+        error='<p class="error">Invalid username or password.</p>'
+    ))
+
+
+@app.get("/logout")
+async def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse("/login")
+
+
 @app.get("/", response_class=RedirectResponse)
-async def root():
+async def root(request: Request):
+    if not _is_authenticated(request):
+        return RedirectResponse("/login")
     return "/portfolio"
 
 
 @app.get("/api/account")
-async def api_account():
+async def api_account(request: Request):
+    _require_auth(request)
     obp, equity = fetch_buying_power()
     return {"buying_power": obp, "equity": equity, "account_id": TRADIER_ACCOUNT_ID}
 
 
 @app.get("/api/trades")
-async def api_trades():
+async def api_trades(request: Request):
+    _require_auth(request)
     try:
         trades, recommendations, heat_scores = load_trades()
     except FileNotFoundError:
@@ -332,7 +424,8 @@ class ApproveRequest(BaseModel):
 
 
 @app.post("/api/trades/{ticker}/approve")
-async def api_approve(ticker: str, req: ApproveRequest):
+async def api_approve(request: Request, ticker: str, req: ApproveRequest):
+    _require_auth(request)
     if req.contracts < 1:
         raise HTTPException(400, "contracts must be >= 1")
     try:
@@ -364,7 +457,8 @@ async def api_approve(ticker: str, req: ApproveRequest):
 
 
 @app.get("/api/positions")
-async def api_positions():
+async def api_positions(request: Request):
+    _require_auth(request)
     positions = db.load_open_positions()
     today = date.today()
     result = []
@@ -399,7 +493,8 @@ async def api_positions():
 
 
 @app.post("/api/positions/{position_id}/close")
-async def api_close(position_id: int):
+async def api_close(request: Request, position_id: int):
+    _require_auth(request)
     positions = db.load_open_positions()
     pos = next((p for p in positions if p["id"] == position_id), None)
     if not pos:
@@ -430,7 +525,8 @@ def load_closed_trades() -> list[dict]:
 
 
 @app.get("/api/portfolio")
-async def api_portfolio():
+async def api_portfolio(request: Request):
+    _require_auth(request)
     obp, equity = fetch_buying_power()
     open_positions = db.load_open_positions()
     closed_trades = load_closed_trades()
@@ -1133,17 +1229,23 @@ setInterval(loadPositions, 60000);
 
 
 @app.get("/portfolio", response_class=HTMLResponse)
-async def portfolio_page():
+async def portfolio_page(request: Request):
+    if not _is_authenticated(request):
+        return RedirectResponse("/login")
     return HTMLResponse(_page("portfolio", _PORTFOLIO_CONTENT))
 
 
 @app.get("/approval", response_class=HTMLResponse)
-async def approval_page():
+async def approval_page(request: Request):
+    if not _is_authenticated(request):
+        return RedirectResponse("/login")
     return HTMLResponse(_page("approval", _APPROVAL_CONTENT))
 
 
 @app.get("/positions", response_class=HTMLResponse)
-async def positions_page():
+async def positions_page(request: Request):
+    if not _is_authenticated(request):
+        return RedirectResponse("/login")
     return HTMLResponse(_page("positions", _POSITIONS_CONTENT))
 
 

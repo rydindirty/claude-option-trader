@@ -5,3 +5,5 @@ requests
 anthropic
 finnhub-python
 pydantic
+itsdangerous
+python-multipart
