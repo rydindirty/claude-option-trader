@@ -1,21 +1,13 @@
-# Credit Spread Finder
+# News Spread Engine
 
-**Purpose:** Find the 9 best options trades (credit spreads) from 500 stock tickers in minutes
+**Purpose:** Find and execute the best options credit spreads from 500 stock tickers — fully automated, cloud-hosted, with a web UI for trade approval and position management.
 
 **What to know:** Which exact trades to place today
-**What to do:** Execute high-probability credit spreads
-**What to feel:** Confident because math backs every trade
+**What to do:** Approve high-probability credit spreads via the web UI
+**What to feel:** Confident because math, AI, and macro regime data back every trade
 
 > **Original concept and pipeline architecture by [Temple-Stuart](https://github.com/Temple-Stuart/temple-stuart-accounting).**
-> This implementation migrates the pipeline to the Tradier brokerage API and replaces GPT analysis with Claude AI.
-
----
-
-### What's in it for me?
-- Save 3 hours of manual searching daily
-- Make money 70% of the time (mathematically proven)
-- Never miss high-volatility opportunities
-- Stop losing on shitty scanner data
+> This implementation migrates the pipeline to the Tradier brokerage API, replaces GPT analysis with Claude AI, and adds a full cloud deployment with web UI.
 
 ---
 
@@ -26,13 +18,43 @@
 | Brokerage / market data | [Tradier](https://tradier.com) |
 | News data | [Finnhub](https://finnhub.io) |
 | AI analysis | [Claude](https://anthropic.com) (Anthropic) |
+| Macro regime | [FRED API](https://fred.stlouisfed.org/docs/api/) (cached) |
+| Volatility forecast | [KronosAI](https://github.com/kronos-ai) (×0.80–1.20 score multiplier) |
 | Spread math | Black-Scholes (built-in) |
+| Web UI | [FastAPI](https://fastapi.tiangolo.com) + vanilla JS |
+| Analytics | SQLite (`data/trades.db`) |
+| Cloud | AWS EC2 t3.micro, Ubuntu 24.04, US East (Ohio) |
+| SSL / reverse proxy | nginx + Let's Encrypt |
+
+---
+
+## Web UI
+
+The web UI has three tabs:
+
+### Portfolio
+- Total equity, option buying power, total P&L, and open position count
+- Chart.js cumulative P&L chart with 1W / 1M / ALL filter
+- Win rate, average P&L, and total trades
+- Closed trade history table with color-coded close-reason badges (profit target / stop loss / time stop / manual)
+
+### Approval
+- Claude-recommended TRADE spreads shown as cards with full stats (credit, max loss, ROI, PoP, strikes, expiry, profit target, stop loss)
+- Contract quantity input with +/− stepper and suggested count based on buying power
+- Approve / Skip buttons — Approve calls Tradier preview then places a live order and logs to SQLite
+- WATCH and SKIP candidates listed below for visibility
+
+### Positions
+- Open positions with live P&L pulled from Tradier
+- P&L progress bar toward profit target
+- Auto-refresh every 60 seconds
+- Manual close button with confirmation modal
 
 ---
 
 ## Pipeline
 
-### Phase 1 — Build a Portfolio
+### Phase 1 — Build a Universe
 
 **Step 00A:** Download S&P 500 company list from GitHub. Extract ticker symbols. Save 503 tickers to `data/sp500.json`.
 
@@ -76,14 +98,38 @@ python3 pipeline/00f_get_news_tradier.py
 python3 pipeline/00g_claude_sentiment_filter.py
 ```
 
+**Step 00H:** Pull macro regime signals from FRED (VIX, yield curve, credit spreads). Classify market as Bull / Bear / Neutral. Cache results to `data/fred_cache.json` to avoid redundant API calls.
+
+```bash
+python3 pipeline/00h_macro_regime.py
+```
+
 ---
 
 ### Phase 2 — Build Credit Spreads
 
-**Step 01:** Stream real-time bid/ask quotes from Tradier for the filtered stock list. Save mid-price, spread, and timestamp to `data/stock_prices.json`.
+**Step 01A:** Stream real-time bid/ask quotes from Tradier for the filtered stock list. Save mid-price, spread, and timestamp to `data/stock_prices.json`.
 
 ```bash
-python3 pipeline/01_get_prices_tradier.py
+python3 pipeline/01a_get_prices_tradier.py
+```
+
+**Step 01B:** Fetch RSI, MACD, and Bollinger Bands for each ticker. Score technicals (positive range RSI 45–70; extremes >75 or <30 penalized). Uses 400-day history buffer. Save to `data/technicals.json`.
+
+```bash
+python3 pipeline/01b_get_technicals.py
+```
+
+**Step 01C:** Calculate peer z-scores for IV within GICS sectors. Normalize each ticker's IV against sector peers to identify relative richness/cheapness. Save to `data/peer_zscores.json`.
+
+```bash
+python3 pipeline/01c_peer_zscores.py
+```
+
+**Step 01D:** Call KronosAI volatility forecast API. Apply a ×0.80–1.20 multiplier to each spread's composite score based on the forecast. Falls back to neutral (×1.0) on API failure. Save adjusted scores to `data/kronos_scores.json`.
+
+```bash
+python3 pipeline/01d_kronos_forecast.py
 ```
 
 **Step 02:** Stream full options chains from Tradier. Filter 0–45 DTE, 70–130% of stock price strikes. Save expiration dates, strikes, call/put symbols, and bid/ask to `data/chains.json`.
@@ -104,31 +150,31 @@ python3 pipeline/03_check_liquidity_tradier.py
 python3 pipeline/04_get_greeks_tradier.py
 ```
 
-**Step 05:** Pair strikes into Bull Put and Bear Call spreads. Filter short delta 15–35% (OTM probability). Calculate credit, max loss, and ROI. Use Black-Scholes with strike-specific IV to calculate PoP. Filter ROI 5–50%, PoP ≥60%. Save to `data/spreads.json`.
+**Step 05:** Pair strikes into Bull Put and Bear Call spreads. Filter short delta 15–35% (OTM probability). Calculate credit, max loss, and ROI. Use Black-Scholes with strike-specific IV to calculate PoP. Filter: ROI 5–50%, PoP ≥68%, credit ≥$0.60, max width $25. Save to `data/spreads.json`.
 
 ```bash
 python3 pipeline/05_calculate_spreads_tradier.py
 ```
 
-**Step 06:** Score each spread as `(ROI × PoP) / 100`. Keep only the highest-scoring spread per ticker (22 total). Categorize as ENTER (PoP ≥70% + ROI ≥20%), WATCH (PoP ≥60% + ROI ≥30%), or SKIP. Save to `data/ranked_spreads.json`.
+**Step 06:** Score each spread as `PoP × (1 + ROI/100)`, adjusted by Kronos multiplier. Keep highest-scoring spread per ticker. Categorize as ENTER (PoP ≥68% + ROI ≥15%), WATCH (PoP ≥68% + ROI ≥10%), or SKIP. Save to `data/ranked_spreads.json`.
 
 ```bash
 python3 pipeline/06_rank_spreads_tradier.py
 ```
 
-**Step 07:** Select top 9 by rank. Add sector mapping (XLK/XLF/XLV etc). Format into report table with rank, ticker, type, strikes, DTE, ROI, PoP, credit, max loss. Save to `data/report_table.json`.
+**Step 07:** Select top candidates — ENTER/WATCH fills first, SKIP fills remaining slots up to 9. Add sector mapping. Format into report table with rank, ticker, type, strikes, DTE, ROI, PoP, credit, max loss. Save to `data/report_table.json`.
 
 ```bash
 python3 pipeline/07_build_report_tradier.py
 ```
 
-**Step 08:** Send each trade to Claude AI with 3 news headlines. Claude applies 5W1H analysis (Who/What/When/Where/Why/How), assigns a heat score 1–10 (news/catalyst risk), and recommends **Trade / Wait / Skip**. Save to `data/top9_analysis.json`.
+**Step 08:** Send each trade to Claude AI with 3 news headlines and the macro regime signal. Claude applies 5W1H analysis, assigns a heat score 1–10, and recommends **TRADE / WATCH / SKIP**. Default is TRADE — SKIP only for confirmed dated binary catalysts within DTE. Save to `data/top9_analysis.json`.
 
 ```bash
 python3 pipeline/08_claude_analysis.py
 ```
 
-**Step 09:** Parse Claude's structured output. Extract ticker, type, strikes, DTE, ROI, PoP, heat score, and recommendation. Print formatted table. Save timestamped CSV for Excel.
+**Step 09:** Parse Claude's structured output. Extract ticker, type, strikes, DTE, ROI, PoP, heat score, and recommendation. Print formatted table. Save timestamped CSV for records.
 
 ```bash
 python3 pipeline/09_format_trades_tradier.py
@@ -138,13 +184,13 @@ python3 pipeline/09_format_trades_tradier.py
 
 ### Phase 3 — Execute & Monitor
 
-**Step 10:** Run the full pipeline end-to-end (Steps 00A → 09), then auto-launch Steps 11 and 12.
+**Step 10:** Run the full pipeline end-to-end (Steps 00A → 09), then serve results to the web UI for approval.
 
 ```bash
 python3 pipeline/10_run_pipeline_tradier.py
 ```
 
-**Step 11:** Human approval gate. Presents each Claude-recommended **TRADE** with full details (strikes, credit, max loss, ROI, PoP, heat score). Prompts for contract count, previews the order via Tradier, requires explicit `yes` confirmation before placing any live order. Saves placed trades to `data/open_positions.json`.
+**Step 11:** Parse Claude's final recommendations and prepare TRADE entries for the web UI approval queue. Format-agnostic parser handles any Claude output structure.
 
 ```bash
 python3 pipeline/11_place_trades.py
@@ -155,7 +201,7 @@ python3 pipeline/11_place_trades.py
 - **Stop loss** — close when spread costs 2× the credit to close
 - **Time stop** — close when DTE reaches 21 days
 
-Places closing orders automatically via Tradier. Logs closed trades to `data/closed_positions.json`.
+Places closing orders automatically via Tradier. Logs closed trades to SQLite and `data/closed_positions.json`.
 
 ```bash
 python3 pipeline/12_position_monitor.py
@@ -163,26 +209,54 @@ python3 pipeline/12_position_monitor.py
 
 ---
 
-## Quick Start
+## Deployment
+
+The pipeline and web UI run on **AWS EC2** (t3.micro, Ubuntu 24.04, US East Ohio).
+
+| Component | Detail |
+|---|---|
+| Web UI | Custom domain, nginx + Let's Encrypt SSL |
+| Pipeline schedule | 9:25 AM ET, Monday–Friday (cron) |
+| Service | `spreads-ui.service` (systemd, auto-starts on reboot) |
+| Pipeline logs | `data/pipeline.log` |
+| Web app logs | `journalctl -u spreads-ui` |
+
+> **Note:** In November when EDT→EST, update the cron from `13:25 UTC` to `14:25 UTC`.
+
+---
+
+## Current Trading Parameters
+
+| Parameter | Value |
+|---|---|
+| PoP floor | 68% |
+| Min credit | $0.60 absolute |
+| Max spread width | $25 |
+| ENTER threshold | ROI ≥15%, PoP ≥68% |
+| WATCH threshold | ROI ≥10%, PoP ≥68% |
+
+---
+
+## Quick Start (local development)
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/rydindirty/<repo-name>.git
-cd <repo-name>
+git clone https://github.com/rydindirty/claude-option-trader.git
+cd claude-option-trader
 
-# 2. Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# 2. Install dependencies
+pip install -r requirements.txt
 
-# 3. Install dependencies
-pip install requests openai anthropic finnhub-python
+# 3. Configure credentials
+cp .env.example .env
+# Edit .env with your Tradier token, Finnhub key, Anthropic key,
+# and web UI credentials (WEB_USERNAME, WEB_PASSWORD, SESSION_SECRET)
 
-# 4. Configure credentials
-cp config.py.example config.py
-# Edit config.py with your Tradier token, Finnhub key, and Anthropic key
-
-# 5. Run the full pipeline
+# 4. Run the full pipeline
 python3 pipeline/10_run_pipeline_tradier.py
+
+# 5. Start the web UI
+uvicorn web_app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ---
@@ -191,19 +265,25 @@ python3 pipeline/10_run_pipeline_tradier.py
 
 ```
 S&P 500 (503)
-  → Price filter       → ~150 liquid stocks
-  → Options filter     → ~100 with tradeable chains
-  → IV filter          → ~60 in 15–80% IV range
-  → Score & select     → Top 22 tickers
-  → Sentiment filter   → Risky stocks removed
-  → Spread builder     → Thousands of spread candidates
-  → Liquidity check    → Only liquid strikes
-  → Greeks             → Delta-filtered OTM spreads
-  → ROI/PoP filter     → High-probability trades only
-  → Rank & top 9       → Best spread per ticker
-  → Claude analysis    → Heat score + recommendation
-  → Human approval     → Live orders placed
-  → Position monitor   → Auto-exit at targets
+  → Price filter         → ~150 liquid stocks
+  → Options filter       → ~100 with tradeable chains
+  → IV filter            → ~60 in 15–80% IV range
+  → Score & select       → Top 22 tickers
+  → Sentiment filter     → Risky stocks removed
+  → Macro regime (FRED)  → Bull / Bear / Neutral classification
+  → Technicals           → RSI / MACD / Bollinger scored
+  → Peer z-scores        → IV richness vs sector
+  → Kronos AI            → Volatility forecast multiplier
+  → Spread builder       → Thousands of spread candidates
+  → Liquidity check      → Only liquid strikes
+  → Greeks               → Delta-filtered OTM spreads
+  → ROI/PoP filter       → High-probability trades only
+  → Rank & top 9         → Best spread per ticker
+  → Claude analysis      → Heat score + recommendation
+  → Web UI approval      → Human approves contract count
+  → Live order           → Tradier executes multi-leg spread
+  → Position monitor     → Auto-exit at profit target / stop / DTE
+  → SQLite analytics     → Full trade history and P&L tracking
 ```
 
 ---
@@ -211,4 +291,4 @@ S&P 500 (503)
 ## Credit
 
 Original pipeline concept and architecture by **[Temple-Stuart](https://github.com/Temple-Stuart/temple-stuart-accounting)**.
-This fork migrates market data and trade execution to the Tradier API and replaces GPT-4 analysis with Claude AI.
+This fork migrates market data and trade execution to the Tradier API, replaces GPT-4 analysis with Claude AI, and adds macro regime filtering, KronosAI volatility forecasting, a FastAPI web UI, and full cloud deployment.
