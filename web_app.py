@@ -347,7 +347,7 @@ def close_position(position, current_value):
 async def login_page(request: Request):
     if _is_authenticated(request):
         return RedirectResponse("/portfolio")
-    return HTMLResponse(_LOGIN_PAGE.format(error=""))
+    return HTMLResponse(_LOGIN_PAGE.replace("{error}", ""))
 
 
 @app.post("/login", response_class=HTMLResponse)
@@ -355,8 +355,8 @@ async def login_post(request: Request, username: str = Form(...), password: str 
     if username == WEB_USERNAME and password == WEB_PASSWORD:
         request.session["authenticated"] = True
         return RedirectResponse("/portfolio", status_code=303)
-    return HTMLResponse(_LOGIN_PAGE.format(
-        error='<p class="error">Invalid username or password.</p>'
+    return HTMLResponse(_LOGIN_PAGE.replace(
+        "{error}", '<p class="error">Invalid username or password.</p>'
     ))
 
 
