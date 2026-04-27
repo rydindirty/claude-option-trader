@@ -73,9 +73,19 @@ def _parse_analysis(analysis_text, tickers):
     recommendations = {}
     heat_scores = {}
     current_ticker = None
+    pending_rec = False  # True when previous line was a bare "RECOMMENDATION:"
 
     for line in analysis_text.split("\n"):
         stripped = line.strip()
+
+        # If the previous line was a bare RECOMMENDATION:, this line is the value.
+        if pending_rec and current_ticker and current_ticker not in recommendations:
+            for kw in ("TRADE", "WAIT", "SKIP"):
+                if stripped.upper().startswith(kw):
+                    recommendations[current_ticker] = kw
+                    break
+            pending_rec = False
+
         # Strip markdown noise to get plain tokens, then check if this line
         # is a numbered section header containing a known ticker.
         # All observed formats share: a digit (section number) near the ticker.
@@ -95,10 +105,13 @@ def _parse_analysis(analysis_text, tickers):
 
         if "RECOMMENDATION:" in upper and current_ticker not in recommendations:
             after = upper.split("RECOMMENDATION:", 1)[1].strip().lstrip("* ")
-            for kw in ("TRADE", "WAIT", "SKIP"):
-                if after.startswith(kw):
-                    recommendations[current_ticker] = kw
-                    break
+            if after:
+                for kw in ("TRADE", "WAIT", "SKIP"):
+                    if after.startswith(kw):
+                        recommendations[current_ticker] = kw
+                        break
+            else:
+                pending_rec = True  # value is on the next line
 
         if "HEAT:" in upper and current_ticker not in heat_scores:
             try:

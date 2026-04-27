@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+anthropic
+finnhub-python
+pydantic
+itsdangerous
+python-multipart
