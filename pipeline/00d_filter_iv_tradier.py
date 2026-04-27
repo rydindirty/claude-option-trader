@@ -29,35 +29,27 @@ def get_chain_with_greeks(ticker, expiration):
     return options  # list of option objects with greeks attached
 
 def get_atm_iv(options, stock_price):
-    # Find the strike closest to the current stock price, then average
-    # the call and put IV at that strike to get ATM IV
+    # Find strikes closest to the current stock price and collect smv_vol values.
+    # Scans the nearest 5 strikes per side so a single null smv_vol doesn't fail
+    # the whole ticker (common on thinly-quoted chains).
     calls = [o for o in options if o.get("option_type") == "call"]
     puts  = [o for o in options if o.get("option_type") == "put"]
 
     if not calls:
         return None
 
-    atm_call = min(calls, key=lambda o: abs(float(o["strike"]) - stock_price))
-    atm_strike = float(atm_call["strike"])
+    calls.sort(key=lambda o: abs(float(o["strike"]) - stock_price))
+    puts.sort(key=lambda o: abs(float(o["strike"]) - stock_price))
 
-    # Pull smv_vol from greeks sub-object; it is annualized IV as a decimal
-    call_iv = None
-    put_iv  = None
-
-    greeks = atm_call.get("greeks") or {}
-    raw = greeks.get("smv_vol")
-    if raw is not None:
-        call_iv = float(raw)
-
-    atm_puts = [o for o in puts if float(o["strike"]) == atm_strike]
-    if atm_puts:
-        greeks = atm_puts[0].get("greeks") or {}
+    ivs = []
+    for o in calls[:5] + puts[:5]:
+        greeks = o.get("greeks") or {}
         raw = greeks.get("smv_vol")
         if raw is not None:
-            put_iv = float(raw)
+            v = float(raw)
+            if v > 0:
+                ivs.append(v)
 
-    # Average whichever IVs are available
-    ivs = [v for v in [call_iv, put_iv] if v is not None and v > 0]
     if not ivs:
         return None
     return sum(ivs) / len(ivs)
@@ -100,7 +92,7 @@ def filter_iv():
 
             iv_pct = iv * 100
 
-            if 15 <= iv_pct <= 80:
+            if 10 <= iv_pct <= 80:
                 passed.append({
                     **stock_data,
                     "iv": round(iv, 4),
@@ -121,7 +113,7 @@ def save_results(passed, failed):
         "timestamp": datetime.now().isoformat(),
         "passed_count": len(passed),
         "failed_count": len(failed),
-        "criteria": "IV 15-80%",
+        "criteria": "IV 10-80%",
         "stocks": passed
     }
     with open("data/filter3_passed.json", "w") as f:
@@ -130,7 +122,17 @@ def save_results(passed, failed):
     print(f"\nResults:")
     print(f"  Passed: {len(passed)}")
     print(f"  Failed: {len(failed)}")
-    print(f"\nCriteria: IV 15-80%")
+    print(f"\nCriteria: IV 10-80%")
+
+    if failed:
+        from collections import Counter
+        def _bucket(r):
+            if r.startswith("IV") and "out of range" in r:
+                return "IV out of range"
+            return r
+        reasons = Counter(_bucket(f["reason"]) for f in failed)
+        for reason, count in reasons.most_common():
+            print(f"  {reason}: {count}")
 
 def main():
     passed, failed = filter_iv()
