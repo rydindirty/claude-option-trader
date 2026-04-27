@@ -173,18 +173,44 @@ def _parse_analysis(analysis_text, tickers):
     return recommendations, heat_scores
 
 
+def _parse_rationale(analysis_text: str, tickers: list) -> dict:
+    ticker_set = {t.upper() for t in tickers}
+    rationale = {}
+    blocks = re.split(r'\n(?=#\d+\.)', "\n" + analysis_text)
+    for block in blocks:
+        m = re.match(r'#\d+\.\s+([A-Z]+)', block.strip())
+        if not m:
+            continue
+        ticker = m.group(1).upper()
+        if ticker not in ticker_set:
+            continue
+        info = {}
+        for bullet in re.finditer(r'[•·]\s+(WHAT|HOW|WHY):\s*(.+)', block):
+            info[bullet.group(1).lower()] = bullet.group(2).strip()
+        cat = re.search(r'CATALYST RISK[:\s]*\n\s*(.+?)(?=\n\s*RECOMMENDATION|\Z)', block, re.DOTALL | re.IGNORECASE)
+        info['catalyst'] = cat.group(1).strip() if cat else ''
+        reason = re.search(
+            r'RECOMMENDATION[:\s]*\n\s*(?:Trade|Wait|Skip)[^\n]*\n(.+?)(?=\n\n|\Z)',
+            block, re.DOTALL | re.IGNORECASE
+        )
+        info['reason'] = reason.group(1).strip() if reason else ''
+        rationale[ticker] = info
+    return rationale
+
+
 def load_trades():
     with open(_data("report_table.json"), "r") as f:
         trades = json.load(f)["report_table"]
-    recommendations, heat_scores = {}, {}
+    recommendations, heat_scores, rationale = {}, {}, {}
     try:
         with open(_data("top9_analysis.json"), "r") as f:
             analysis = json.load(f)["analysis"]
         tickers = [t["ticker"].upper() for t in trades]
         recommendations, heat_scores = _parse_analysis(analysis, tickers)
+        rationale = _parse_rationale(analysis, tickers)
     except Exception:
         pass
-    return trades, recommendations, heat_scores
+    return trades, recommendations, heat_scores, rationale
 
 
 def parse_strikes(legs_str):
@@ -384,7 +410,7 @@ async def api_account(request: Request):
 async def api_trades(request: Request):
     _require_auth(request)
     try:
-        trades, recommendations, heat_scores = load_trades()
+        trades, recommendations, heat_scores, rationale = load_trades()
     except FileNotFoundError:
         return {"trades": [], "error": "Trade data not found — run the pipeline first."}
 
@@ -397,6 +423,7 @@ async def api_trades(request: Request):
         short_strike, long_strike = parse_strikes(t["legs"])
         credit = float(t["net_credit"].replace("$", ""))
         max_loss = float(t["max_loss"].replace("$", ""))
+        r = rationale.get(ticker, {})
         result.append({
             "rank": t["rank"],
             "ticker": ticker,
@@ -415,6 +442,13 @@ async def api_trades(request: Request):
             "suggested_contracts": suggest_contracts(max_loss, obp) if obp else 1,
             "profit_target": round(credit * 0.60, 2),
             "stop_loss": round(credit * 1.5, 2),
+            "rationale": {
+                "what": r.get("what", ""),
+                "how": r.get("how", ""),
+                "why": r.get("why", ""),
+                "catalyst": r.get("catalyst", ""),
+                "reason": r.get("reason", ""),
+            },
         })
     return {"trades": result, "buying_power": obp}
 
@@ -429,7 +463,7 @@ async def api_approve(request: Request, ticker: str, req: ApproveRequest):
     if req.contracts < 1:
         raise HTTPException(400, "contracts must be >= 1")
     try:
-        trades, _, _ = load_trades()
+        trades, _, _, _ = load_trades()
     except FileNotFoundError:
         raise HTTPException(404, "Trade data not found")
 
@@ -704,6 +738,18 @@ nav { background: var(--surface); border-bottom: 1px solid var(--border);
 .reason-stop_loss, .reason-trailing_stop { background: rgba(239,68,68,.12); color: var(--red); }
 .reason-time_stop, .reason-time_stop_eod { background: rgba(245,158,11,.12); color: var(--yellow); }
 .reason-manual_close { background: rgba(59,130,246,.12); color: var(--blue); }
+
+.analyst-note { background: rgba(59,130,246,.06); border: 1px solid rgba(59,130,246,.2);
+                border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 13px; }
+.analyst-note .an-lbl { font-size: 10px; color: var(--blue); text-transform: uppercase;
+                         letter-spacing: 0.5px; font-weight: 700; margin-bottom: 6px; }
+.analyst-note .an-row { color: var(--muted); line-height: 1.5; margin-bottom: 4px; }
+.analyst-note .an-row strong { color: var(--text); }
+.analyst-note .an-reason { color: var(--text); margin-top: 6px; padding-top: 6px;
+                             border-top: 1px solid rgba(59,130,246,.15); font-style: italic; }
+.catalyst-warn { background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.25);
+                  border-radius: 8px; padding: 8px 12px; margin-bottom: 12px;
+                  font-size: 12px; color: var(--yellow); }
 
 .spin { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border);
          border-top-color: var(--blue); border-radius: 50%; animation: spin 0.7s linear infinite;
@@ -1008,6 +1054,20 @@ _APPROVAL_CONTENT = """
 <script>
 let _trades = [], _results = {};
 
+function renderAnalystNote(r) {
+  if (!r || (!r.what && !r.reason)) return '';
+  const hasCatalyst = r.catalyst && !r.catalyst.toLowerCase().startsWith('none');
+  let html = '<div class="analyst-note"><div class="an-lbl">Analyst Note</div>';
+  if (r.what) html += `<div class="an-row"><strong>Event:</strong> ${r.what}</div>`;
+  if (r.how)  html += `<div class="an-row"><strong>Price impact:</strong> ${r.how}</div>`;
+  if (r.reason) html += `<div class="an-reason">${r.reason}</div>`;
+  html += '</div>';
+  if (hasCatalyst) {
+    html = `<div class="catalyst-warn">⚠ Catalyst: ${r.catalyst}</div>` + html;
+  }
+  return html;
+}
+
 function heatColor(h) {
   if (h == null) return 'var(--muted)';
   if (h <= 3) return 'var(--green)';
@@ -1049,8 +1109,8 @@ function renderTrades() {
         </div>
         <div class="card-body">
           <div class="grid2">
-            <div class="stat"><div class="lbl">Net Credit</div><div class="val green">$${t.net_credit.toFixed(2)}</div></div>
-            <div class="stat"><div class="lbl">Max Loss</div><div class="val red">$${t.max_loss.toFixed(2)}</div></div>
+            <div class="stat"><div class="lbl">Net Credit / Contract</div><div class="val green">${fmt(t.net_credit * 100)}</div></div>
+            <div class="stat"><div class="lbl">Max Loss / Contract</div><div class="val red">${fmt(t.max_loss * 100)}</div></div>
             <div class="stat"><div class="lbl">ROI</div><div class="val">${t.roi}</div></div>
             <div class="stat"><div class="lbl">PoP</div><div class="val">${t.pop}</div></div>
           </div>
@@ -1059,9 +1119,10 @@ function renderTrades() {
             <div class="stat"><div class="lbl">Expiry</div><div class="val">${t.exp_date} (${t.dte}d)</div></div>
           </div>
           <div class="exit-row">
-            <div class="exit-item"><div class="lbl">Profit Target (40%)</div><div class="val green">$${t.profit_target.toFixed(2)}</div></div>
-            <div class="exit-item"><div class="lbl">Stop Loss (1.5x)</div><div class="val red">$${t.stop_loss.toFixed(2)}</div></div>
+            <div class="exit-item"><div class="lbl">Profit Target (40%)</div><div class="val green">${fmt(t.profit_target * 100)}</div></div>
+            <div class="exit-item"><div class="lbl">Stop Loss (1.5x)</div><div class="val red">${fmt(t.stop_loss * 100)}</div></div>
           </div>
+          ${renderAnalystNote(t.rationale)}
           ${done ? '' : `
           <div class="qty-row">
             <button class="qty-btn" onclick="adj('${t.ticker}',-1)">−</button>
@@ -1093,8 +1154,8 @@ function renderTrades() {
         </div>
         <div class="card-body">
           <div class="grid2">
-            <div class="stat"><div class="lbl">Net Credit</div><div class="val">$${t.net_credit.toFixed(2)}</div></div>
-            <div class="stat"><div class="lbl">Max Loss</div><div class="val">$${t.max_loss.toFixed(2)}</div></div>
+            <div class="stat"><div class="lbl">Net Credit / Contract</div><div class="val">${fmt(t.net_credit * 100)}</div></div>
+            <div class="stat"><div class="lbl">Max Loss / Contract</div><div class="val">${fmt(t.max_loss * 100)}</div></div>
             <div class="stat"><div class="lbl">ROI</div><div class="val">${t.roi}</div></div>
             <div class="stat"><div class="lbl">PoP</div><div class="val">${t.pop}</div></div>
           </div>
