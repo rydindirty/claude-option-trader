@@ -507,7 +507,7 @@ async def api_trades(request: Request):
     try:
         trades, recommendations, heat_scores, rationale = load_trades()
     except FileNotFoundError:
-        return {"trades": [], "error": "Trade data not found — run the pipeline first."}
+        return {"trades": [], "error": "Trade data not found — run the pipeline first.", "last_run": _last_run_info()}
 
     obp, _ = fetch_buying_power()
     result = []
