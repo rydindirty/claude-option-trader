@@ -23,8 +23,13 @@ sys.path.insert(0, os.path.join(BASE_DIR, "pipeline"))       # db.py
 
 from config import (TRADIER_TOKEN, TRADIER_ENV, get_tradier_session,
                     TRADIER_BASE_URL, TRADIER_HEADERS, TRADIER_ACCOUNT_ID,
-                    WEB_USERNAME, WEB_PASSWORD, SESSION_SECRET,
-                    ALERT_EMAIL, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS)
+                    WEB_USERNAME, WEB_PASSWORD, SESSION_SECRET)
+
+ALERT_EMAIL = os.getenv("ALERT_EMAIL", "")
+SMTP_HOST   = os.getenv("SMTP_HOST", "")
+SMTP_PORT   = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER   = os.getenv("SMTP_USER", "")
+SMTP_PASS   = os.getenv("SMTP_PASS", "")
 import db
 
 _session = get_tradier_session()
