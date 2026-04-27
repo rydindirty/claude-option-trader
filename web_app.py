@@ -1008,6 +1008,10 @@ def _page(active_tab: str, page_content: str) -> str:
   <div class="acct-stat"><div class="lbl">Buying Power</div><div class="val" id="bp">—</div></div>
   <div class="acct-stat"><div class="lbl">Total Equity</div><div class="val" id="eq">—</div></div>
 </div>""" if show_acct_bar else ""
+    # Split HTML from JS so the <script> block is never nested inside the content div
+    _parts = page_content.split("<!-- JS -->", 1)
+    html_part = _parts[0]
+    js_part   = _parts[1] if len(_parts) > 1 else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1027,7 +1031,7 @@ def _page(active_tab: str, page_content: str) -> str:
   </div>
 </nav>
 {acct_bar}
-<div class="content">{page_content}</div>
+<div class="content">{html_part}</div>
 <div id="toast"></div>
 <div class="overlay" id="overlay">
   <div class="modal">
@@ -1040,7 +1044,7 @@ def _page(active_tab: str, page_content: str) -> str:
   </div>
 </div>
 <script>{_JS_COMMON}</script>
-{page_content.split('<!-- JS -->')[1] if '<!-- JS -->' in page_content else ''}
+{js_part}
 </body>
 </html>"""
 
