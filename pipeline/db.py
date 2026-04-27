@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS trades (
 
 _MIGRATIONS = [
     "ALTER TABLE trades ADD COLUMN regime TEXT",
+    "ALTER TABLE trades ADD COLUMN notes TEXT",
+    "ALTER TABLE trades ADD COLUMN alert_sent INTEGER NOT NULL DEFAULT 0",
 ]
 
 
@@ -112,6 +114,24 @@ def load_open_positions() -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def save_trade_notes(trade_id: int, notes: str):
+    """Update the notes field on a trade record."""
+    init_db()
+    conn = _get_conn()
+    conn.execute("UPDATE trades SET notes = ? WHERE id = ?", (notes, trade_id))
+    conn.commit()
+    conn.close()
+
+
+def mark_alert_sent(trade_id: int):
+    """Mark that a P&L alert email has been sent for this position."""
+    init_db()
+    conn = _get_conn()
+    conn.execute("UPDATE trades SET alert_sent = 1 WHERE id = ?", (trade_id,))
+    conn.commit()
+    conn.close()
 
 
 def close_trade(

@@ -2,11 +2,15 @@
 FastAPI web UI for News Spread Engine.
 Run from project root: uvicorn web_app:app --host 0.0.0.0 --port 8000 --reload
 """
+import asyncio
 import json
 import os
 import re
+import smtplib
+import subprocess
 import sys
 from datetime import datetime, date
+from email.mime.text import MIMEText
 
 from fastapi import FastAPI, HTTPException, Request, Form, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -19,13 +23,22 @@ sys.path.insert(0, os.path.join(BASE_DIR, "pipeline"))       # db.py
 
 from config import (TRADIER_TOKEN, TRADIER_ENV, get_tradier_session,
                     TRADIER_BASE_URL, TRADIER_HEADERS, TRADIER_ACCOUNT_ID,
-                    WEB_USERNAME, WEB_PASSWORD, SESSION_SECRET)
+                    WEB_USERNAME, WEB_PASSWORD, SESSION_SECRET,
+                    ALERT_EMAIL, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS)
 import db
 
 _session = get_tradier_session()
 
+_pipeline_proc: "subprocess.Popen | None" = None
+_pipeline_log = os.path.join(BASE_DIR, "data", "pipeline.log")
+
 app = FastAPI(title="News Spread Engine", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+
+
+@app.on_event("startup")
+async def _start_monitors():
+    asyncio.create_task(_alert_monitor_loop())
 
 
 # ── Auth helpers ───────────────────────────────────────────────────────
@@ -230,6 +243,83 @@ def _read_regime():
             return json.load(f).get("regime_label")
     except Exception:
         return None
+
+
+def _last_run_info() -> dict:
+    ts, regime = None, None
+    try:
+        with open(_data("top9_analysis.json")) as f:
+            ts = json.load(f).get("timestamp")
+    except Exception:
+        pass
+    try:
+        with open(_data("macro_regime.json")) as f:
+            regime = json.load(f).get("regime_label", "Unknown")
+    except Exception:
+        pass
+    if not ts:
+        return {"ran": False, "label": "Never run", "stale": True, "regime": regime or "Unknown"}
+    try:
+        run_dt = datetime.fromisoformat(ts)
+        delta_days = (datetime.now().date() - run_dt.date()).days
+        if delta_days == 0:
+            label = f"Today {run_dt.strftime('%-I:%M %p')} ✓"
+            stale = False
+        elif delta_days == 1:
+            label = "Stale — last run yesterday"
+            stale = True
+        else:
+            label = f"Stale — last run {delta_days} days ago"
+            stale = True
+        return {"ran": True, "label": label, "stale": stale, "regime": regime or "Unknown", "ts": ts}
+    except Exception:
+        return {"ran": False, "label": "Unknown", "stale": True, "regime": regime or "Unknown"}
+
+
+def _send_alert_email(ticker: str, alert_type: str, profit_pct: float):
+    sign = "+" if profit_pct >= 0 else ""
+    msg_line = f"{ticker} {alert_type} ({sign}{profit_pct:.1f}%)"
+    if not ALERT_EMAIL or not SMTP_HOST or not SMTP_USER:
+        print(f"[ALERT] {msg_line} — SMTP not configured, skipping email")
+        return
+    try:
+        body = (f"Position: {ticker}\nAlert: {alert_type}\nP&L: {sign}{profit_pct:.1f}%\n\n"
+                f"Log in to https://richjo.co to review.")
+        msg = MIMEText(body)
+        msg["Subject"] = f"NSE Alert: {msg_line}"
+        msg["From"] = SMTP_USER
+        msg["To"] = ALERT_EMAIL
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+            smtp.starttls()
+            smtp.login(SMTP_USER, SMTP_PASS)
+            smtp.sendmail(SMTP_USER, ALERT_EMAIL, msg.as_string())
+        print(f"[ALERT] Email sent: {msg_line}")
+    except Exception as e:
+        print(f"[ALERT] Email failed: {e}")
+
+
+async def _alert_monitor_loop():
+    await asyncio.sleep(30)
+    while True:
+        try:
+            positions = db.load_open_positions()
+            for pos in positions:
+                if pos.get("alert_sent"):
+                    continue
+                current_value = get_spread_value(pos["short_symbol"], pos["long_symbol"])
+                if current_value is None:
+                    continue
+                credit = pos["credit_received"]
+                profit_pct = round((credit - current_value) / credit * 100, 1)
+                if profit_pct >= 40.0:
+                    _send_alert_email(pos["ticker"], "Profit Target Hit", profit_pct)
+                    db.mark_alert_sent(pos["id"])
+                elif profit_pct <= -50.0:
+                    _send_alert_email(pos["ticker"], "Stop Loss Hit", profit_pct)
+                    db.mark_alert_sent(pos["id"])
+        except Exception as e:
+            print(f"[ALERT MONITOR] {e}")
+        await asyncio.sleep(60)
 
 
 def _order_payload(trade, contracts, preview=False):
@@ -450,11 +540,12 @@ async def api_trades(request: Request):
                 "reason": r.get("reason", ""),
             },
         })
-    return {"trades": result, "buying_power": obp}
+    return {"trades": result, "buying_power": obp, "last_run": _last_run_info()}
 
 
 class ApproveRequest(BaseModel):
     contracts: int
+    notes: str = ""
 
 
 @app.post("/api/trades/{ticker}/approve")
@@ -484,6 +575,8 @@ async def api_approve(request: Request, ticker: str, req: ApproveRequest):
         order_id = response.get("order", {}).get("id", "unknown")
         status = response.get("order", {}).get("status", "unknown")
         row_id = save_placed_trade(trade, req.contracts, response)
+        if req.notes.strip():
+            db.save_trade_notes(row_id, req.notes.strip())
         return {"success": True, "order_id": order_id, "status": status,
                 "db_row": row_id, "preview": preview_info}
     except Exception as e:
@@ -598,7 +691,17 @@ async def api_portfolio(request: Request):
             "close_reason": t.get("close_reason"),
             "closed_at": (t.get("closed_at") or "")[:10],
             "regime": t.get("regime"),
+            "notes": t.get("notes") or "",
         })
+
+    ticker_map: dict[str, float] = {}
+    for t in closed_trades:
+        tk = t["ticker"]
+        ticker_map[tk] = round(ticker_map.get(tk, 0.0) + (t.get("total_profit") or 0.0), 2)
+    by_ticker = sorted(
+        [{"ticker": k, "total_profit": v} for k, v in ticker_map.items()],
+        key=lambda x: x["total_profit"], reverse=True
+    )
 
     return {
         "buying_power": obp,
@@ -610,7 +713,41 @@ async def api_portfolio(request: Request):
         "avg_pnl": avg_pnl,
         "chart": chart_points,
         "history": history,
+        "by_ticker": by_ticker,
     }
+
+
+def _pipeline_is_running() -> bool:
+    global _pipeline_proc
+    return _pipeline_proc is not None and _pipeline_proc.poll() is None
+
+
+@app.post("/api/pipeline/run")
+async def api_pipeline_run(request: Request):
+    _require_auth(request)
+    global _pipeline_proc
+    if _pipeline_is_running():
+        return {"started": False, "reason": "Pipeline already running"}
+    script = os.path.join(BASE_DIR, "run_full_pipeline.py")
+    with open(_pipeline_log, "w") as log_f:
+        _pipeline_proc = subprocess.Popen(
+            [sys.executable, script],
+            stdout=log_f, stderr=subprocess.STDOUT,
+            cwd=BASE_DIR,
+        )
+    return {"started": True}
+
+
+@app.get("/api/pipeline/logs")
+async def api_pipeline_logs(request: Request):
+    _require_auth(request)
+    lines: list[str] = []
+    try:
+        with open(_pipeline_log) as f:
+            lines = f.read().splitlines()[-150:]
+    except FileNotFoundError:
+        pass
+    return {"running": _pipeline_is_running(), "lines": lines}
 
 
 # ── HTML ───────────────────────────────────────────────────────────────
@@ -773,6 +910,40 @@ nav { background: var(--surface); border-bottom: 1px solid var(--border);
 .drow:last-of-type { border-bottom: none; }
 .drow .v { font-weight: 600; }
 .modal-btns { display: flex; gap: 10px; margin-top: 16px; }
+
+/* Run banner */
+.run-banner { display: flex; align-items: center; justify-content: space-between;
+              gap: 10px; margin-bottom: 14px; padding: 10px 14px;
+              background: var(--surface); border: 1px solid var(--border);
+              border-radius: var(--radius); font-size: 13px; }
+.run-banner.stale { border-color: rgba(245,158,11,.35); background: rgba(245,158,11,.05); }
+.run-status-text { color: var(--muted); }
+.run-status-text strong { color: var(--text); }
+.run-regime { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.btn-run { background: var(--blue); color: #fff; border: none; border-radius: 8px;
+            padding: 7px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+            white-space: nowrap; -webkit-tap-highlight-color: transparent; }
+.btn-run:disabled { opacity: 0.6; cursor: default; }
+
+/* Pipeline log modal */
+.log-modal { background: var(--surface); border: 1px solid var(--border);
+              border-radius: var(--radius); padding: 16px; width: 100%;
+              max-width: 600px; max-height: 70vh; display: flex; flex-direction: column; }
+.log-modal h3 { font-size: 16px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.log-box { flex: 1; overflow-y: auto; background: var(--bg); border: 1px solid var(--border);
+            border-radius: 8px; padding: 10px 12px; font-family: monospace; font-size: 12px;
+            line-height: 1.6; color: #a8b0c8; white-space: pre-wrap; min-height: 200px; }
+
+/* Notes */
+.notes-area { width: 100%; background: var(--bg); border: 1px solid var(--border);
+               border-radius: 8px; color: var(--text); font-size: 13px; padding: 8px 10px;
+               resize: vertical; min-height: 60px; margin-bottom: 10px;
+               font-family: var(--font); }
+.notes-area:focus { outline: none; border-color: var(--blue); }
+.notes-lbl { font-size: 11px; color: var(--muted); text-transform: uppercase;
+              letter-spacing: 0.4px; margin-bottom: 5px; }
+.history-note { font-size: 12px; color: var(--muted); font-style: italic;
+                 padding: 2px 10px 8px; }
 """
 
 _JS_COMMON = """
@@ -898,6 +1069,16 @@ _PORTFOLIO_CONTENT = """
   <div class="mini-stat"><div class="lbl">Total Trades</div><div class="val" id="p-total">—</div></div>
 </div>
 
+<div class="section-hdr">P&amp;L by Ticker</div>
+<div class="chart-card" id="ticker-chart-card" style="display:none">
+  <div class="chart-wrap" style="height:auto;padding-bottom:16px">
+    <canvas id="ticker-chart"></canvas>
+  </div>
+</div>
+<div id="ticker-empty" style="display:none" class="empty" style="padding:20px">
+  <h3 style="font-size:14px;color:var(--muted)">No closed trades yet</h3>
+</div>
+
 <div class="section-hdr">Trade History</div>
 <div class="card">
   <div id="history-body" style="overflow-x:auto">
@@ -906,7 +1087,7 @@ _PORTFOLIO_CONTENT = """
 </div>
 <!-- JS -->
 <script>
-let _chartData = [], _chartInstance = null, _activeFilter = 'ALL';
+let _chartData = [], _chartInstance = null, _tickerChartInstance = null, _activeFilter = 'ALL';
 
 function filterPoints(points, filter) {
   if (filter === 'ALL' || !points.length) return points;
@@ -1014,6 +1195,7 @@ function renderHistory(history) {
       <td>${t.profit_pct != null ? (t.profit_pct >= 0 ? '+' : '') + t.profit_pct.toFixed(1) + '%' : '—'}</td>
       <td><span class="reason-badge reason-${reason}">${reasonLabel[reason] || reason}</span></td>
     </tr>`;
+    if (t.notes) rows += `<tr><td colspan="6" class="history-note">${t.notes}</td></tr>`;
   }
   el.innerHTML = `<table class="history-table">
     <thead><tr><th>Ticker</th><th>Strikes</th><th>Closed</th><th>P&L</th><th>%</th><th>Reason</th></tr></thead>
@@ -1038,21 +1220,95 @@ async function loadPortfolio() {
 
     _chartData = d.chart;
     buildChart(filterPoints(_chartData, _activeFilter));
+    buildTickerChart(d.by_ticker || []);
     renderHistory(d.history);
   } catch(e) {
     document.getElementById('history-body').innerHTML =
       `<div class="empty"><div class="icon">⚠️</div><h3>Error</h3><p>${e.message}</p></div>`;
   }
 }
+
+function buildTickerChart(byTicker) {
+  const card = document.getElementById('ticker-chart-card');
+  const empty = document.getElementById('ticker-empty');
+  if (!byTicker.length) {
+    card.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  card.style.display = 'block';
+  empty.style.display = 'none';
+  const canvas = document.getElementById('ticker-chart');
+  const labels = byTicker.map(r => r.ticker);
+  const values = byTicker.map(r => r.total_profit);
+  const colors = values.map(v => v >= 0 ? 'rgba(34,197,94,0.75)' : 'rgba(239,68,68,0.75)');
+  const borders = values.map(v => v >= 0 ? '#22c55e' : '#ef4444');
+  const barH = Math.max(28, labels.length * 34);
+  canvas.style.height = barH + 'px';
+  canvas.height = barH;
+  if (_tickerChartInstance) _tickerChartInstance.destroy();
+  _tickerChartInstance = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        backgroundColor: colors,
+        borderColor: borders,
+        borderWidth: 1,
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1a1d27',
+          borderColor: '#2a2d3a',
+          borderWidth: 1,
+          titleColor: '#8b8fa8',
+          bodyColor: '#e8eaf0',
+          callbacks: {
+            label: ctx => ' ' + (ctx.parsed.x >= 0 ? '+' : '') + '$' + ctx.parsed.x.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2})
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#2a2d3a' },
+          ticks: { color: '#8b8fa8', font: {size:11},
+                   callback: v => (v >= 0 ? '+' : '') + '$' + v.toLocaleString() }
+        },
+        y: { grid: { display: false }, ticks: { color: '#e8eaf0', font: {size:12,weight:'600'} } }
+      }
+    }
+  });
+}
+
 loadPortfolio();
 </script>
 """
 
 _APPROVAL_CONTENT = """
+<div id="run-banner" class="run-banner" style="display:none"></div>
 <div id="trades"></div>
+
+<div class="overlay" id="pipeline-overlay">
+  <div class="log-modal">
+    <h3>Pipeline Run <span class="spin" id="pipe-spin" style="display:none"></span></h3>
+    <div class="log-box" id="pipe-log">Starting…</div>
+    <div class="modal-btns" style="margin-top:12px">
+      <button class="btn btn-skip" onclick="closePipelineModal()">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- JS -->
 <script>
-let _trades = [], _results = {};
+let _trades = [], _results = {}, _pipePoller = null;
 
 function renderAnalystNote(r) {
   if (!r || (!r.what && !r.reason)) return '';
@@ -1124,6 +1380,8 @@ function renderTrades() {
           </div>
           ${renderAnalystNote(t.rationale)}
           ${done ? '' : `
+          <div class="notes-lbl">Trade Note (optional)</div>
+          <textarea class="notes-area" id="note-${t.ticker}" placeholder="Why you're taking or skipping this trade…"></textarea>
           <div class="qty-row">
             <button class="qty-btn" onclick="adj('${t.ticker}',-1)">−</button>
             <input class="qty-input" type="number" id="qty-${t.ticker}" value="${t.suggested_contracts}" min="1" max="99">
@@ -1174,6 +1432,7 @@ function adj(ticker, d) {
 async function approve(ticker) {
   const contracts = parseInt(document.getElementById('qty-' + ticker).value || 1);
   if (contracts < 1) { toast('Enter at least 1 contract', true); return; }
+  const notes = (document.getElementById('note-' + ticker) || {}).value || '';
   const ab = document.getElementById('approve-' + ticker);
   const sb = document.getElementById('skip-' + ticker);
   ab.disabled = sb.disabled = true;
@@ -1181,7 +1440,7 @@ async function approve(ticker) {
   try {
     const d = await fetch('/api/trades/' + ticker + '/approve', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({contracts})
+      body: JSON.stringify({contracts, notes})
     }).then(r => r.json());
     if (d.success) {
       _results[ticker] = {type:'placed', order_id: d.order_id, contracts};
@@ -1204,12 +1463,69 @@ function skip(ticker) {
   renderTrades();
 }
 
+function renderRunBanner(lr) {
+  const el = document.getElementById('run-banner');
+  if (!lr) { el.style.display = 'none'; return; }
+  el.style.display = 'flex';
+  el.className = 'run-banner' + (lr.stale ? ' stale' : '');
+  const color = lr.stale ? 'var(--yellow)' : 'var(--green)';
+  el.innerHTML = `
+    <div>
+      <div class="run-status-text" style="color:${color}"><strong>${lr.label}</strong></div>
+      <div class="run-regime">Regime: ${lr.regime}</div>
+    </div>
+    <button class="btn-run" onclick="runPipeline()">Re-run Pipeline</button>`;
+}
+
+async function runPipeline() {
+  document.getElementById('pipeline-overlay').classList.add('open');
+  document.getElementById('pipe-log').textContent = 'Starting pipeline…';
+  document.getElementById('pipe-spin').style.display = 'inline-block';
+  try {
+    const d = await fetch('/api/pipeline/run', {method:'POST'}).then(r => r.json());
+    if (!d.started) {
+      document.getElementById('pipe-log').textContent = d.reason || 'Could not start.';
+      document.getElementById('pipe-spin').style.display = 'none';
+      return;
+    }
+  } catch(e) {
+    document.getElementById('pipe-log').textContent = 'Error: ' + e.message;
+    document.getElementById('pipe-spin').style.display = 'none';
+    return;
+  }
+  _pipePoller = setInterval(pollPipelineLogs, 2000);
+}
+
+async function pollPipelineLogs() {
+  try {
+    const d = await fetch('/api/pipeline/logs').then(r => r.json());
+    const box = document.getElementById('pipe-log');
+    box.textContent = d.lines.join('\n') || '(no output yet)';
+    box.scrollTop = box.scrollHeight;
+    if (!d.running) {
+      clearInterval(_pipePoller); _pipePoller = null;
+      document.getElementById('pipe-spin').style.display = 'none';
+      loadTrades();
+    }
+  } catch(e) {}
+}
+
+function closePipelineModal() {
+  document.getElementById('pipeline-overlay').classList.remove('open');
+  if (_pipePoller) { clearInterval(_pipePoller); _pipePoller = null; }
+}
+
 async function loadTrades() {
   const el = document.getElementById('trades');
   el.innerHTML = '<div class="empty"><span class="spin"></span></div>';
   try {
     const d = await fetch('/api/trades').then(r => r.json());
-    if (d.error) { el.innerHTML = `<div class="empty"><div class="icon">⚠️</div><h3>No Data</h3><p>${d.error}</p></div>`; return; }
+    if (d.error) {
+      renderRunBanner(d.last_run || null);
+      el.innerHTML = `<div class="empty"><div class="icon">⚠️</div><h3>No Data</h3><p>${d.error}</p></div>`;
+      return;
+    }
+    renderRunBanner(d.last_run || null);
     _trades = d.trades;
     renderTrades();
   } catch(e) {
