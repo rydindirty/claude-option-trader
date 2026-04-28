@@ -1509,7 +1509,7 @@ async function pollPipelineLogs() {
   try {
     const d = await fetch('/api/pipeline/logs').then(r => r.json());
     const box = document.getElementById('pipe-log');
-    box.textContent = d.lines.join('\n') || '(no output yet)';
+    box.textContent = d.lines.join('\\n') || '(no output yet)';
     box.scrollTop = box.scrollHeight;
     if (!d.running) {
       clearInterval(_pipePoller); _pipePoller = null;
