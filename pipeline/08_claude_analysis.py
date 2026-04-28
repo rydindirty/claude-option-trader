@@ -256,7 +256,7 @@ def main():
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=4096,
             system=(
                 "You analyze credit spreads with structured 5W1H news analysis. "
@@ -295,6 +295,7 @@ def main():
 
     except Exception as e:
         print(f"❌ Error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -69,7 +69,7 @@ OUTPUT JSON ONLY - no explanation, no markdown fences:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1024,
         system="You filter stocks for credit spread safety. Output JSON only. No markdown fences, no explanation.",
         messages=[
