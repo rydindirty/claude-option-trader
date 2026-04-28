@@ -3,10 +3,16 @@
 Master Pipeline Runner - Complete Data Flow (Tradier + Claude)
 Called by the web app's Re-run Pipeline button.
 """
+import os
 import subprocess
 import sys
 import time
 from datetime import datetime
+
+# Re-exec inside the project venv if we're running outside it
+_venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", "bin", "python3")
+if os.path.exists(_venv_python) and os.path.abspath(sys.executable) != os.path.abspath(_venv_python):
+    os.execv(_venv_python, [_venv_python] + sys.argv)
 
 def run_step(step_name, script_path, description):
     print("\n" + "="*80)
