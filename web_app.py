@@ -1538,6 +1538,7 @@ async function loadTrades() {
     _trades = d.trades;
     renderTrades();
   } catch(e) {
+    renderRunBanner({ran: false, label: 'Pipeline not run', stale: true, regime: '—'});
     el.innerHTML = `<div class="empty"><div class="icon">⚠️</div><h3>Error</h3><p>${e.message}</p></div>`;
   }
 }
