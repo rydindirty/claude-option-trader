@@ -1,9 +1,13 @@
 fastapi
 uvicorn[standard]
+starlette
 python-dotenv
 requests
 anthropic
+openai
 finnhub-python
+pandas
+scipy
 pydantic
 itsdangerous
 python-multipart
