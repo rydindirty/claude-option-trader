@@ -980,6 +980,11 @@ nav { background: var(--surface); border-bottom: 1px solid var(--border);
 .empty .icon { font-size: 40px; margin-bottom: 12px; }
 .empty h3 { font-size: 16px; margin-bottom: 6px; color: var(--text); }
 
+/* Positions page — full width, two-column card grid */
+.content-positions { max-width: 100% !important; }
+.positions-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+                   gap: 16px; }
+
 /* Position stock price row */
 .price-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
               background: var(--bg); border-radius: 8px; padding: 10px 12px; }
@@ -992,6 +997,7 @@ nav { background: var(--surface); border-bottom: 1px solid var(--border);
                      background: var(--bg); padding: 10px 12px 8px; }
 .price-chart-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase;
                     letter-spacing: 0.4px; margin-bottom: 6px; }
+.price-chart-inner { position: relative; height: 110px; }
 .price-chart-wrap canvas { display: block; }
 
 /* Portfolio */
@@ -1178,7 +1184,7 @@ def _page(active_tab: str, page_content: str) -> str:
   </div>
 </nav>
 {acct_bar}
-<div class="content">{html_part}</div>
+<div class="content content-{active_tab}">{html_part}</div>
 <div id="toast"></div>
 <div class="overlay" id="overlay">
   <div class="modal">
@@ -1710,7 +1716,7 @@ function renderPositions(list) {
   const active = list.filter(p => p.status === 'open');
   const pending = list.filter(p => p.status === 'pending');
   const closing = list.filter(p => p.status === 'closing');
-  let html = `<div class="section-hdr">Positions (${list.length})</div>`;
+  let html = `<div class="section-hdr">Positions (${list.length})</div><div class="positions-grid">`;
   for (const p of list) {
     const tc = p.type.includes('Bull') ? 'badge-bull' : 'badge-bear';
     const pct = p.profit_pct;
@@ -1745,7 +1751,7 @@ function renderPositions(list) {
         ${statusBanner}
         <div id="price-row-${p.id}" class="price-chart-wrap" style="display:none">
           <div class="price-chart-lbl">Today's Price Action</div>
-          <canvas id="chart-${p.id}" height="80"></canvas>
+          <div class="price-chart-inner"><canvas id="chart-${p.id}"></canvas></div>
         </div>
         <div class="grid2">
           <div class="stat"><div class="lbl">Credit</div><div class="val green">${fmt(p.credit_received)}</div></div>
@@ -1772,6 +1778,7 @@ function renderPositions(list) {
       </div>
     </div>`;
   }
+  html += `</div>`;
   el.innerHTML = html;
   for (const p of list) loadStockChart(p);
 }
