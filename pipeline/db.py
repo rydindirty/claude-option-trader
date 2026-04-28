@@ -75,10 +75,9 @@ def init_db():
     conn.close()
 
 
-def insert_open_trade(position: dict) -> int:
+def insert_open_trade(position: dict, status: str = "open") -> int:
     """
-    Insert a new open trade record.
-    Accepts the same dict shape that save_placed_trade() used to build.
+    Insert a new trade record.  status should be 'open' or 'pending'.
     Returns the new row id.
     """
     init_db()
@@ -94,15 +93,56 @@ def insert_open_trade(position: dict) -> int:
             :ticker, :type, :short_strike, :long_strike, :expiration,
             :dte_at_entry, :credit_received, :max_profit, :max_loss,
             :contracts, :short_symbol, :long_symbol, :tradier_order_id,
-            :opened_at, :profit_target_pct, :stop_loss_pct, :regime, 'open'
+            :opened_at, :profit_target_pct, :stop_loss_pct, :regime, :status
         )
         """,
-        {**position, "regime": position.get("regime")},
+        {**position, "regime": position.get("regime"), "status": status},
     )
     conn.commit()
     row_id = cur.lastrowid
     conn.close()
     return row_id
+
+
+def update_trade_status(trade_id: int, status: str):
+    """Update lifecycle status (e.g. pending → open, closing → closed)."""
+    init_db()
+    conn = _get_conn()
+    conn.execute("UPDATE trades SET status = ? WHERE id = ?", (status, trade_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_trade(trade_id: int):
+    """Hard-delete a trade row (used when a pending order is rejected/expired)."""
+    init_db()
+    conn = _get_conn()
+    conn.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
+    conn.commit()
+    conn.close()
+
+
+def mark_closing(trade_id: int, close_order_id: str, close_value: float):
+    """Record a submitted close order without finalising the trade yet."""
+    init_db()
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE trades SET status = 'closing', close_order_id = ?, close_value = ? WHERE id = ?",
+        (close_order_id, close_value, trade_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_active_positions() -> list[dict]:
+    """Return open + pending + closing trades for the UI."""
+    init_db()
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM trades WHERE status IN ('open','pending','closing') ORDER BY opened_at"
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 def load_open_positions() -> list[dict]:

@@ -9,7 +9,8 @@ import re
 import smtplib
 import subprocess
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timezone
+from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 
 from fastapi import FastAPI, HTTPException, Request, Form, Depends
@@ -265,10 +266,14 @@ def _last_run_info() -> dict:
     if not ts:
         return {"ran": False, "label": "Never run", "stale": True, "regime": regime or "Unknown"}
     try:
+        _CT = ZoneInfo("America/Chicago")
         run_dt = datetime.fromisoformat(ts)
-        delta_days = (datetime.now().date() - run_dt.date()).days
+        if run_dt.tzinfo is None:
+            run_dt = run_dt.replace(tzinfo=timezone.utc)
+        run_dt = run_dt.astimezone(_CT)
+        delta_days = (datetime.now(_CT).date() - run_dt.date()).days
         if delta_days == 0:
-            label = f"Today {run_dt.strftime('%-I:%M %p')} ✓"
+            label = f"Today {run_dt.strftime('%-I:%M %p')} CT ✓"
             stale = False
         elif delta_days == 1:
             label = "Stale — last run yesterday"
@@ -368,7 +373,20 @@ def place_order(trade, contracts):
     return r.json()
 
 
-def save_placed_trade(trade, contracts, order_response):
+def get_tradier_order(order_id) -> dict:
+    """Fetch a single order from Tradier. Returns the order dict or {}."""
+    try:
+        r = _session.get(
+            f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{order_id}",
+            headers=TRADIER_HEADERS,
+            timeout=10)
+        r.raise_for_status()
+        return r.json().get("order", {})
+    except Exception:
+        return {}
+
+
+def save_placed_trade(trade, contracts, order_response, status: str = "pending"):
     short_strike, long_strike = parse_strikes(trade["legs"])
     credit = float(trade["net_credit"].replace("$", ""))
     max_loss = float(trade["max_loss"].replace("$", ""))
@@ -392,7 +410,7 @@ def save_placed_trade(trade, contracts, order_response):
         "profit_target_pct": 0.40,
         "stop_loss_pct": 1.50,
         "regime": _read_regime(),
-    })
+    }, status=status)
 
 
 def get_spread_value(short_symbol, long_symbol):
@@ -428,7 +446,7 @@ def get_spread_value(short_symbol, long_symbol):
 def close_position(position, current_value):
     if not current_value or current_value <= 0:
         raise ValueError("Cannot place closing order without a valid market price")
-    credit, contracts = position["credit_received"], position["contracts"]
+    contracts = position["contracts"]
     payload = {
         "class": "multileg",
         "symbol": position["ticker"],
@@ -448,18 +466,14 @@ def close_position(position, current_value):
         headers=TRADIER_HEADERS, data=payload)
     r.raise_for_status()
     response = r.json()
-    profit = round((credit - current_value) * contracts * 100, 2)
-    profit_pct = round((credit - current_value) / credit * 100, 1)
-    db.close_trade(
-        trade_id=position["id"],
-        close_reason="manual_close",
-        close_value=current_value,
-        profit_per_contract=round((credit - current_value) * 100, 2),
-        total_profit=profit,
-        profit_pct=profit_pct,
-        close_order_id=response.get("order", {}).get("id", "unknown"),
-    )
-    return profit, response.get("order", {}).get("id", "unknown")
+    order_id = response.get("order", {}).get("id", "unknown")
+    tradier_status = response.get("order", {}).get("status", "unknown")
+    if tradier_status == "rejected":
+        errors = response.get("order", {}).get("error", "Close order rejected by broker")
+        raise ValueError(f"Close order rejected by Tradier: {errors}")
+    # Mark as closing — do not finalise until fill is confirmed via /api/positions/sync
+    db.mark_closing(position["id"], close_order_id=str(order_id), close_value=current_value)
+    return order_id
 
 
 # ── API routes ─────────────────────────────────────────────────────────
@@ -578,12 +592,17 @@ async def api_approve(request: Request, ticker: str, req: ApproveRequest):
     try:
         response = place_order(trade, req.contracts)
         order_id = response.get("order", {}).get("id", "unknown")
-        status = response.get("order", {}).get("status", "unknown")
-        row_id = save_placed_trade(trade, req.contracts, response)
+        tradier_status = response.get("order", {}).get("status", "unknown")
+        if tradier_status == "rejected":
+            errors = response.get("order", {}).get("error", "Order rejected by broker")
+            raise HTTPException(400, f"Order rejected by Tradier: {errors}")
+        row_id = save_placed_trade(trade, req.contracts, response, status="pending")
         if req.notes.strip():
             db.save_trade_notes(row_id, req.notes.strip())
-        return {"success": True, "order_id": order_id, "status": status,
+        return {"success": True, "order_id": order_id, "status": tradier_status,
                 "db_row": row_id, "preview": preview_info}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Order failed: {e}")
 
@@ -591,7 +610,7 @@ async def api_approve(request: Request, ticker: str, req: ApproveRequest):
 @app.get("/api/positions")
 async def api_positions(request: Request):
     _require_auth(request)
-    positions = db.load_open_positions()
+    positions = db.load_active_positions()
     today = date.today()
     result = []
     for pos in positions:
@@ -620,28 +639,133 @@ async def api_positions(request: Request):
             "stop_loss": round(credit * 1.5, 2),
             "opened_at": pos.get("opened_at"),
             "regime": pos.get("regime"),
+            "status": pos.get("status", "open"),
+            "tradier_order_id": pos.get("tradier_order_id"),
         })
     return {"positions": result}
+
+
+@app.get("/api/stock/{ticker}/chart")
+async def api_stock_chart(request: Request, ticker: str):
+    _require_auth(request)
+    ticker = ticker.upper()
+    today = date.today().isoformat()
+    price = None
+    change = None
+    change_pct = None
+    candles = []
+    try:
+        q = _session.get(
+            f"{TRADIER_BASE_URL}/markets/quotes",
+            headers={"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"},
+            params={"symbols": ticker},
+            timeout=10,
+        )
+        q.raise_for_status()
+        qdata = q.json().get("quotes", {}).get("quote", {})
+        if isinstance(qdata, list):
+            qdata = qdata[0] if qdata else {}
+        if qdata:
+            price = qdata.get("last") or qdata.get("bid")
+            prev_close = qdata.get("prevclose")
+            if price and prev_close:
+                change = round(float(price) - float(prev_close), 2)
+                change_pct = round(change / float(prev_close) * 100, 2)
+    except Exception:
+        pass
+    try:
+        ts = _session.get(
+            f"{TRADIER_BASE_URL}/markets/timesales",
+            headers={"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"},
+            params={"symbol": ticker, "interval": "5min", "start": today, "session_filter": "open"},
+            timeout=10,
+        )
+        ts.raise_for_status()
+        series = ts.json().get("series", {})
+        if series:
+            raw = series.get("data", [])
+            if isinstance(raw, dict):
+                raw = [raw]
+            candles = [{"t": d["time"], "p": d["close"]} for d in raw if "time" in d and "close" in d]
+    except Exception:
+        pass
+    return {"ticker": ticker, "price": price, "change": change, "change_pct": change_pct, "candles": candles}
 
 
 @app.post("/api/positions/{position_id}/close")
 async def api_close(request: Request, position_id: int):
     _require_auth(request)
-    positions = db.load_open_positions()
-    pos = next((p for p in positions if p["id"] == position_id), None)
+    positions = db.load_active_positions()
+    pos = next((p for p in positions if p["id"] == position_id and p["status"] in ("open", "pending")), None)
     if not pos:
-        raise HTTPException(404, f"Position {position_id} not found")
+        raise HTTPException(404, f"Position {position_id} not found or already closing")
 
     current_value = get_spread_value(pos["short_symbol"], pos["long_symbol"])
     if current_value is None:
         raise HTTPException(503, "Could not fetch live price — try again")
 
     try:
-        profit, order_id = close_position(pos, current_value)
+        order_id = close_position(pos, current_value)
         return {"success": True, "order_id": order_id,
-                "close_value": current_value, "total_profit": profit}
+                "close_value": current_value, "message": "Close order submitted — pending fill confirmation"}
     except Exception as e:
         raise HTTPException(500, f"Close failed: {e}")
+
+
+@app.post("/api/positions/sync")
+async def api_positions_sync(request: Request):
+    """
+    Poll Tradier for every pending/closing position and reconcile DB state.
+    - pending  + filled   → status = 'open'
+    - pending  + rejected/expired/canceled → delete row
+    - closing  + filled   → run close_trade() to finalise
+    - closing  + rejected/expired/canceled → revert to 'open'
+    Returns a summary of actions taken.
+    """
+    _require_auth(request)
+    positions = db.load_active_positions()
+    actions = []
+    for pos in positions:
+        order_id = pos.get("tradier_order_id") if pos["status"] == "pending" else pos.get("close_order_id")
+        if not order_id or order_id == "unknown":
+            continue
+        order = get_tradier_order(order_id)
+        tradier_status = order.get("status", "")
+        filled = tradier_status in ("filled", "partially_filled")
+        dead = tradier_status in ("rejected", "expired", "canceled")
+
+        if pos["status"] == "pending":
+            if filled:
+                db.update_trade_status(pos["id"], "open")
+                actions.append({"id": pos["id"], "ticker": pos["ticker"], "action": "activated", "order_status": tradier_status})
+            elif dead:
+                db.delete_trade(pos["id"])
+                actions.append({"id": pos["id"], "ticker": pos["ticker"], "action": "removed", "order_status": tradier_status})
+
+        elif pos["status"] == "closing":
+            credit = pos["credit_received"]
+            contracts = pos["contracts"]
+            close_value = pos.get("close_value") or 0
+            if filled:
+                # Use the actual fill price if available, else fall back to submitted price
+                fill_price = float(order.get("avg_fill_price") or close_value)
+                profit = round((credit - fill_price) * contracts * 100, 2)
+                profit_pct = round((credit - fill_price) / credit * 100, 1) if credit else 0
+                db.close_trade(
+                    trade_id=pos["id"],
+                    close_reason=pos.get("close_reason") or "manual_close",
+                    close_value=fill_price,
+                    profit_per_contract=round((credit - fill_price) * 100, 2),
+                    total_profit=profit,
+                    profit_pct=profit_pct,
+                    close_order_id=str(order_id),
+                )
+                actions.append({"id": pos["id"], "ticker": pos["ticker"], "action": "closed", "profit": profit, "order_status": tradier_status})
+            elif dead:
+                db.update_trade_status(pos["id"], "open")
+                actions.append({"id": pos["id"], "ticker": pos["ticker"], "action": "reverted_to_open", "order_status": tradier_status})
+
+    return {"synced": len(actions), "actions": actions}
 
 
 def load_closed_trades() -> list[dict]:
@@ -795,6 +919,15 @@ nav { background: var(--surface); border-bottom: 1px solid var(--border);
 .badge-TRADE { background: rgba(34,197,94,.15); color: var(--green); }
 .badge-WAIT  { background: rgba(245,158,11,.15); color: var(--yellow); }
 .badge-SKIP  { background: rgba(239,68,68,.15); color: var(--red); }
+.badge-pending { background: rgba(245,158,11,.15); color: var(--yellow); }
+.badge-closing { background: rgba(59,130,246,.15); color: var(--blue); }
+.status-banner { font-size: 12px; font-weight: 600; padding: 8px 12px;
+                  border-radius: 8px; margin-bottom: 12px; display: flex;
+                  align-items: center; gap: 8px; }
+.status-banner.pending { background: rgba(245,158,11,.08); color: var(--yellow);
+                          border: 1px solid rgba(245,158,11,.25); }
+.status-banner.closing { background: rgba(59,130,246,.08); color: var(--blue);
+                          border: 1px solid rgba(59,130,246,.25); }
 .heat { margin-left: auto; font-size: 12px; }
 
 .card-body { padding: 14px 16px; }
@@ -846,6 +979,20 @@ nav { background: var(--surface); border-bottom: 1px solid var(--border);
 .empty { text-align: center; padding: 48px 24px; color: var(--muted); }
 .empty .icon { font-size: 40px; margin-bottom: 12px; }
 .empty h3 { font-size: 16px; margin-bottom: 6px; color: var(--text); }
+
+/* Position stock price row */
+.price-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+              background: var(--bg); border-radius: 8px; padding: 10px 12px; }
+.price-lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; flex: none; }
+.price-val { font-size: 18px; font-weight: 700; }
+.price-delta { font-size: 13px; font-weight: 600; margin-left: 4px; }
+.price-up { color: var(--green); }
+.price-down { color: var(--red); }
+.price-chart-wrap { margin-bottom: 12px; border-radius: 8px; overflow: hidden;
+                     background: var(--bg); padding: 10px 12px 8px; }
+.price-chart-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase;
+                    letter-spacing: 0.4px; margin-bottom: 6px; }
+.price-chart-wrap canvas { display: block; }
 
 /* Portfolio */
 .port-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
@@ -1017,13 +1164,13 @@ def _page(active_tab: str, page_content: str) -> str:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>News Spread Engine</title>
+<title>DickTrades</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
 <style>{_CSS}</style>
 </head>
 <body>
 <nav>
-  <div class="logo">News<span>Spread</span></div>
+  <div class="logo">Dick<span>Trades</span></div>
   <div class="tabs">
     <a href="/portfolio" class="tab {portfolio_cls}">Portfolio</a>
     <a href="/approval"  class="tab {approval_cls}">Approval</a>
@@ -1552,26 +1699,54 @@ _POSITIONS_CONTENT = """
 <script>
 function pnlClass(pct) { return pct == null ? '' : pct >= 0 ? 'green' : 'red'; }
 
+const _charts = {};
+
 function renderPositions(list) {
   const el = document.getElementById('positions');
   if (!list.length) {
     el.innerHTML = '<div class="empty"><div class="icon">📊</div><h3>No Open Positions</h3><p>Approved trades will appear here.</p></div>';
     return;
   }
-  let html = `<div class="section-hdr">Open Positions (${list.length})</div>`;
+  const active = list.filter(p => p.status === 'open');
+  const pending = list.filter(p => p.status === 'pending');
+  const closing = list.filter(p => p.status === 'closing');
+  let html = `<div class="section-hdr">Positions (${list.length})</div>`;
   for (const p of list) {
     const tc = p.type.includes('Bull') ? 'badge-bull' : 'badge-bear';
     const pct = p.profit_pct;
     const barColor = pct == null ? 'var(--muted)' : pct >= 0 ? 'var(--green)' : 'var(--red)';
     const barWidth = pct == null ? 0 : Math.min(100, Math.abs(pct));
+    const isPending = p.status === 'pending';
+    const isClosing = p.status === 'closing';
+    const isOpen = p.status === 'open';
+    const statusBadge = isPending
+      ? `<span class="badge badge-pending" style="margin-left:4px">Pending Fill</span>`
+      : isClosing
+        ? `<span class="badge badge-closing" style="margin-left:4px">Closing</span>`
+        : '';
+    const statusBanner = isPending
+      ? `<div class="status-banner pending">⏳ Waiting for order fill confirmation from Tradier</div>`
+      : isClosing
+        ? `<div class="status-banner closing">⏳ Close order submitted — waiting for fill confirmation</div>`
+        : '';
+    const closeBtn = isClosing
+      ? `<button class="btn btn-close" disabled>Closing…</button>`
+      : `<button class="btn btn-close" onclick='openCloseModal(${p.id}, ${JSON.stringify(p)})'>Close Position</button>`;
     html += `
     <div class="card">
       <div class="card-hdr">
         <span class="ticker">${p.ticker}</span>
         <span class="badge ${tc}">${p.type}</span>
-        <span style="margin-left:auto;font-size:12px;color:var(--muted)">DTE ${p.dte}</span>
+        ${statusBadge}
+        <span id="price-hdr-${p.id}" style="margin-left:auto;font-size:13px;font-weight:600"></span>
+        <span style="font-size:12px;color:var(--muted);margin-left:8px">DTE ${p.dte}</span>
       </div>
       <div class="card-body">
+        ${statusBanner}
+        <div id="price-row-${p.id}" class="price-chart-wrap" style="display:none">
+          <div class="price-chart-lbl">Today's Price Action</div>
+          <canvas id="chart-${p.id}" height="80"></canvas>
+        </div>
         <div class="grid2">
           <div class="stat"><div class="lbl">Credit</div><div class="val green">${fmt(p.credit_received)}</div></div>
           <div class="stat"><div class="lbl">Current Value</div><div class="val">${p.current_value != null ? fmt(p.current_value) : '<span class="spin"></span>'}</div></div>
@@ -1592,25 +1767,97 @@ function renderPositions(list) {
           ${p.regime ? `<div class="exit-item"><div class="lbl">Regime</div><div class="val">${p.regime}</div></div>` : ''}
         </div>
         <div class="btn-row">
-          <button class="btn btn-close" onclick='openCloseModal(${p.id}, ${JSON.stringify(p)})'>Close Position</button>
+          ${closeBtn}
         </div>
       </div>
     </div>`;
   }
   el.innerHTML = html;
+  for (const p of list) loadStockChart(p);
 }
 
-async function loadPositions() {
+async function loadStockChart(p) {
   try {
+    const d = await fetch(`/api/stock/${p.ticker}/chart`).then(r => r.json());
+    const hdr = document.getElementById(`price-hdr-${p.id}`);
+    if (hdr && d.price != null) {
+      const up = d.change_pct == null || d.change_pct >= 0;
+      const arrow = up ? '▲' : '▼';
+      const cls = up ? 'price-up' : 'price-down';
+      const delta = d.change_pct != null ? ` <span class="${cls}">${arrow} ${Math.abs(d.change_pct).toFixed(2)}%</span>` : '';
+      hdr.innerHTML = `<span style="font-size:15px">$${parseFloat(d.price).toFixed(2)}</span>${delta}`;
+    }
+    if (!d.candles || d.candles.length < 2) return;
+    const wrap = document.getElementById(`price-row-${p.id}`);
+    if (wrap) wrap.style.display = '';
+    const canvas = document.getElementById(`chart-${p.id}`);
+    if (!canvas) return;
+    const labels = d.candles.map(c => {
+      const t = new Date(c.t);
+      return t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    });
+    const prices = d.candles.map(c => c.p);
+    const first = prices[0];
+    const last = prices[prices.length - 1];
+    const lineColor = last >= first ? '#22c55e' : '#ef4444';
+    if (_charts[`chart-${p.id}`]) _charts[`chart-${p.id}`].destroy();
+    _charts[`chart-${p.id}`] = new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          data: prices,
+          borderColor: lineColor,
+          borderWidth: 2,
+          pointRadius: 0,
+          fill: true,
+          backgroundColor: lineColor === '#22c55e'
+            ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)',
+          tension: 0.3,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: { legend: { display: false }, tooltip: {
+          callbacks: { label: ctx => `$${ctx.parsed.y.toFixed(2)}` }
+        }},
+        scales: {
+          x: { display: false },
+          y: {
+            display: true,
+            position: 'right',
+            grid: { color: 'rgba(255,255,255,0.04)' },
+            ticks: { color: '#8b8fa8', font: { size: 10 },
+                     callback: v => `$${v.toFixed(0)}` }
+          }
+        }
+      }
+    });
+  } catch(e) { /* silently skip chart errors */ }
+}
+
+async function syncAndLoad() {
+  // Sync first so pending/closing statuses are current, then re-fetch
+  try { await fetch('/api/positions/sync', {method:'POST'}); } catch(e) {}
+}
+
+async function loadPositions(doSync) {
+  try {
+    if (doSync) await syncAndLoad();
     const d = await fetch('/api/positions').then(r => r.json());
     renderPositions(d.positions);
+    // If any positions are still pending/closing, keep syncing on a shorter interval
+    const needsSync = d.positions.some(p => p.status === 'pending' || p.status === 'closing');
+    if (needsSync) setTimeout(() => loadPositions(true), 15000);
   } catch(e) {
     document.getElementById('positions').innerHTML =
       `<div class="empty"><div class="icon">⚠️</div><h3>Error</h3><p>${e.message}</p></div>`;
   }
 }
-loadPositions();
-setInterval(loadPositions, 60000);
+loadPositions(true);
+setInterval(() => loadPositions(false), 60000);
 </script>
 """
 
