@@ -980,9 +980,9 @@ nav { background: var(--surface); border-bottom: 1px solid var(--border);
 .empty .icon { font-size: 40px; margin-bottom: 12px; }
 .empty h3 { font-size: 16px; margin-bottom: 6px; color: var(--text); }
 
-/* Positions page — full width, two-column card grid */
+/* Positions page — full width, responsive card grid */
 .content-positions { max-width: 100% !important; }
-.positions-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+.positions-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(460px, 100%), 1fr));
                    gap: 16px; }
 
 /* Position stock price row */
