@@ -1007,7 +1007,7 @@ nav { background: var(--surface); border-bottom: 1px solid var(--border);
 .port-stat .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 .port-stat .val { font-size: 22px; font-weight: 700; margin-top: 4px; }
 .chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-               margin-bottom: 16px; overflow: hidden; }
+               margin-bottom: 16px; }
 .chart-hdr { padding: 14px 16px; display: flex; align-items: center; border-bottom: 1px solid var(--border); }
 .chart-hdr .title { font-weight: 600; font-size: 14px; }
 .chart-filter { display: flex; gap: 4px; margin-left: auto; }
@@ -1406,6 +1406,8 @@ function buildTickerChart(byTicker) {
   const colors = values.map(v => v >= 0 ? 'rgba(34,197,94,0.75)' : 'rgba(239,68,68,0.75)');
   const borders = values.map(v => v >= 0 ? '#22c55e' : '#ef4444');
   const barH = Math.max(28, labels.length * 34);
+  const wrap = canvas.parentElement;
+  wrap.style.height = (barH + 28) + 'px';
   canvas.style.height = barH + 'px';
   canvas.height = barH;
   if (_tickerChartInstance) _tickerChartInstance.destroy();
