@@ -1405,11 +1405,11 @@ function buildTickerChart(byTicker) {
   const values = byTicker.map(r => r.total_profit);
   const colors = values.map(v => v >= 0 ? 'rgba(34,197,94,0.75)' : 'rgba(239,68,68,0.75)');
   const borders = values.map(v => v >= 0 ? '#22c55e' : '#ef4444');
-  const barH = Math.max(28, labels.length * 34);
+  const barH = Math.max(60, labels.length * 44);
   const wrap = canvas.parentElement;
-  wrap.style.height = (barH + 28) + 'px';
-  canvas.style.height = barH + 'px';
-  canvas.height = barH;
+  wrap.style.height = (barH + 50) + 'px';
+  canvas.style.height = (barH + 50) + 'px';
+  canvas.height = barH + 50;
   if (_tickerChartInstance) _tickerChartInstance.destroy();
   _tickerChartInstance = new Chart(canvas, {
     type: 'bar',
