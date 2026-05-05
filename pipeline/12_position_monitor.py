@@ -25,6 +25,28 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import TRADIER_TOKEN, TRADIER_ENV, get_tradier_session, TRADIER_BASE_URL, TRADIER_HEADERS, TRADIER_ACCOUNT_ID
 import db
 
+# ── Twilio SMS ─────────────────────────────────────────────────
+_TWILIO_SID  = os.getenv("TWILIO_SID", "")
+_TWILIO_TOKEN = os.getenv("TWILIO_TOKEN", "")
+_TWILIO_FROM = os.getenv("TWILIO_FROM", "")
+_TWILIO_TO   = os.getenv("TWILIO_TO", "")
+
+def send_sms(body: str):
+    if not all([_TWILIO_SID, _TWILIO_TOKEN, _TWILIO_FROM, _TWILIO_TO]):
+        print(f"[SMS] Twilio not configured — skipping: {body}")
+        return
+    try:
+        r = requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{_TWILIO_SID}/Messages.json",
+            auth=(_TWILIO_SID, _TWILIO_TOKEN),
+            data={"From": _TWILIO_FROM, "To": _TWILIO_TO, "Body": body},
+            timeout=10,
+        )
+        r.raise_for_status()
+        print(f"[SMS] Sent: {body}")
+    except Exception as e:
+        print(f"[SMS] Failed: {e}")
+
 # ── Tradier config ─────────────────────────────────────────────
 # BASE_URL and HEADERS are now imported from config
 _session = get_tradier_session()  # SSL-verified session for Tradier API
@@ -239,6 +261,8 @@ def check_positions():
                     pos, "time_stop", close_val, response)
                 print(f"  ✅ Closed at ${close_val:.2f} | "
                       f"P&L: ${profit:.2f}")
+                send_sms(f"DickTrades CLOSED {ticker} | Time Stop | "
+                         f"${close_val:.2f} | P&L: ${profit:+.2f}")
             except Exception as e:
                 print(f"  ❌ Close failed: {e}")
                 remaining.append(pos)
@@ -270,6 +294,8 @@ def check_positions():
                             pos, "time_stop_eod", close_val, response)
                         print(f"  ✅ Closed at ${close_val:.2f} | "
                               f"P&L: ${profit:.2f}")
+                        send_sms(f"DickTrades CLOSED {ticker} | 21 DTE EOD | "
+                                 f"${close_val:.2f} | P&L: ${profit:+.2f}")
                     except Exception as e:
                         print(f"  ❌ Close failed: {e}")
                         remaining.append(pos)
@@ -317,6 +343,8 @@ def check_positions():
                         pos, "trailing_stop", current_value, response)
                     print(f"  ✅ Closed at ${current_value:.2f} | "
                           f"P&L: ${profit:.2f}")
+                    send_sms(f"DickTrades CLOSED {ticker} | Trailing Stop | "
+                             f"${current_value:.2f} | P&L: ${profit:+.2f}")
                 except Exception as e:
                     print(f"  ❌ Close failed: {e}")
                     remaining.append(pos)
@@ -333,6 +361,8 @@ def check_positions():
                     pos, "profit_target", current_value, response)
                 print(f"  ✅ Closed at ${current_value:.2f} | "
                       f"P&L: ${profit:.2f}")
+                send_sms(f"DickTrades CLOSED {ticker} | Profit Target | "
+                         f"${current_value:.2f} | P&L: ${profit:+.2f}")
             except Exception as e:
                 print(f"  ❌ Close failed: {e}")
                 remaining.append(pos)
@@ -350,6 +380,8 @@ def check_positions():
                     pos, "stop_loss", current_value, response)
                 print(f"  ✅ Closed at ${current_value:.2f} | "
                       f"P&L: ${profit:.2f}")
+                send_sms(f"DickTrades CLOSED {ticker} | Stop Loss | "
+                         f"${current_value:.2f} | P&L: ${profit:+.2f}")
             except Exception as e:
                 print(f"  ❌ Close failed: {e}")
                 remaining.append(pos)
@@ -369,6 +401,8 @@ def check_positions():
                     pos, "width_cap", current_value, response)
                 print(f"  ✅ Closed at ${current_value:.2f} | "
                       f"P&L: ${profit:.2f}")
+                send_sms(f"DickTrades CLOSED {ticker} | Width Cap | "
+                         f"${current_value:.2f} | P&L: ${profit:+.2f}")
             except Exception as e:
                 print(f"  ❌ Close failed: {e}")
                 remaining.append(pos)
