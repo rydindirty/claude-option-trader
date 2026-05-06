@@ -31,6 +31,30 @@ SMTP_HOST   = os.getenv("SMTP_HOST", "")
 SMTP_PORT   = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER   = os.getenv("SMTP_USER", "")
 SMTP_PASS   = os.getenv("SMTP_PASS", "")
+
+_TWILIO_SID   = os.getenv("TWILIO_SID", "")
+_TWILIO_TOKEN = os.getenv("TWILIO_TOKEN", "")
+_TWILIO_FROM  = os.getenv("TWILIO_FROM", "")
+_TWILIO_TO    = os.getenv("TWILIO_TO", "")
+
+def send_sms(body: str):
+    if not all([_TWILIO_SID, _TWILIO_TOKEN, _TWILIO_FROM, _TWILIO_TO]):
+        print(f"[SMS] Twilio not configured — skipping: {body}")
+        return
+    try:
+        import urllib.request, urllib.parse, base64
+        data = urllib.parse.urlencode({"From": _TWILIO_FROM, "To": _TWILIO_TO, "Body": body}).encode()
+        req = urllib.request.Request(
+            f"https://api.twilio.com/2010-04-01/Accounts/{_TWILIO_SID}/Messages.json",
+            data=data,
+        )
+        creds = base64.b64encode(f"{_TWILIO_SID}:{_TWILIO_TOKEN}".encode()).decode()
+        req.add_header("Authorization", f"Basic {creds}")
+        urllib.request.urlopen(req, timeout=10)
+        print(f"[SMS] Sent: {body}")
+    except Exception as e:
+        print(f"[SMS] Failed to send SMS: {e}")
+
 import db
 
 _session = get_tradier_session()
@@ -595,6 +619,7 @@ async def api_approve(request: Request, ticker: str, req: ApproveRequest):
         tradier_status = response.get("order", {}).get("status", "unknown")
         if tradier_status == "rejected":
             errors = response.get("order", {}).get("error", "Order rejected by broker")
+            send_sms(f"DickTrades ❌ Order REJECTED: {ticker} x{req.contracts} — {errors}")
             raise HTTPException(400, f"Order rejected by Tradier: {errors}")
         row_id = save_placed_trade(trade, req.contracts, response, status="pending")
         if req.notes.strip():
@@ -604,6 +629,7 @@ async def api_approve(request: Request, ticker: str, req: ApproveRequest):
     except HTTPException:
         raise
     except Exception as e:
+        send_sms(f"DickTrades ❌ Order ERROR: {ticker} x{req.contracts} — {e}")
         raise HTTPException(500, f"Order failed: {e}")
 
 
@@ -846,6 +872,149 @@ async def api_portfolio(request: Request):
     }
 
 
+def _analysis_suggestions(trades, by_type, by_reason, by_regime, by_dte):
+    suggestions = []
+    total = len(trades)
+    wins = sum(1 for t in trades if (t.get("total_profit") or 0) > 0)
+    wr = wins / total * 100 if total else 0
+
+    if total < 10:
+        suggestions.append({"priority": "info",
+            "text": f"Only {total} closed trades — patterns may not be statistically reliable yet. Keep building history."})
+
+    if wr < 40:
+        suggestions.append({"priority": "high",
+            "text": f"Win rate is {wr:.1f}%, below the 40% target. Focus on higher-probability setups (PoP ≥ 70%, IV Rank ≥ 30)."})
+    elif wr >= 55:
+        suggestions.append({"priority": "info",
+            "text": f"Strong win rate of {wr:.1f}%! Consider increasing position sizing slightly or relaxing entry filters."})
+
+    if len(by_type) > 1:
+        best = max(by_type, key=lambda x: x["win_rate"])
+        worst = min(by_type, key=lambda x: x["win_rate"])
+        if best["win_rate"] - worst["win_rate"] >= 15 and best["total"] >= 3 and worst["total"] >= 3:
+            suggestions.append({"priority": "medium",
+                "text": f"{best['type']} wins {best['win_rate']}% vs {worst['win_rate']}% for {worst['type']} — lean toward {best['type']} when both setups are available."})
+
+    sl = next((r for r in by_reason if r["reason"] == "stop_loss"), None)
+    if sl and total > 0:
+        pct = sl["count"] / total * 100
+        if pct > 35:
+            suggestions.append({"priority": "high",
+                "text": f"{pct:.0f}% of trades hit stop loss. Consider tightening entry filters (higher PoP, lower IV) or widening the stop slightly."})
+        elif pct < 10 and total >= 10:
+            suggestions.append({"priority": "info",
+                "text": f"Very few stop-loss exits ({pct:.0f}%) — entry filters are working well."})
+
+    pt = next((r for r in by_reason if r["reason"] == "profit_target"), None)
+    if pt and total >= 5:
+        pct = pt["count"] / total * 100
+        if pct < 25:
+            suggestions.append({"priority": "medium",
+                "text": f"Only {pct:.0f}% of trades reach the 40% profit target. Consider lowering the target to 25-30% to lock in gains earlier."})
+
+    filtered_regimes = [r for r in by_regime if r["total"] >= 3]
+    if len(filtered_regimes) > 1:
+        best_r = max(filtered_regimes, key=lambda x: x["win_rate"])
+        worst_r = min(filtered_regimes, key=lambda x: x["win_rate"])
+        if best_r["win_rate"] - worst_r["win_rate"] >= 20:
+            suggestions.append({"priority": "medium",
+                "text": f"Regime '{best_r['regime']}' wins {best_r['win_rate']}% vs {worst_r['win_rate']}% in '{worst_r['regime']}'. Reduce size or skip trades in unfavorable regimes."})
+
+    filtered_dte = [d for d in by_dte if d["total"] >= 3]
+    if filtered_dte:
+        best_dte = max(filtered_dte, key=lambda x: x["win_rate"])
+        worst_dte = min(filtered_dte, key=lambda x: x["win_rate"])
+        if best_dte["win_rate"] - worst_dte["win_rate"] >= 20:
+            suggestions.append({"priority": "medium",
+                "text": f"DTE {best_dte['bucket']} days performs best ({best_dte['win_rate']}% win rate). Avoid entries with DTE {worst_dte['bucket']} ({worst_dte['win_rate']}% win rate)."})
+
+    if not suggestions:
+        suggestions.append({"priority": "info",
+            "text": "No significant pattern anomalies detected. Continue current strategy and monitor as more trades close."})
+
+    return suggestions
+
+
+@app.get("/api/portfolio/analysis")
+async def api_portfolio_analysis(request: Request):
+    _require_auth(request)
+    closed_trades = load_closed_trades()
+    if not closed_trades:
+        return {"has_data": False, "total_trades": 0, "suggestions": [], "by_type": [], "by_reason": [], "by_regime": [], "by_dte": []}
+
+    by_type: dict = {}
+    for t in closed_trades:
+        typ = t.get("type") or "Unknown"
+        e = by_type.setdefault(typ, {"wins": 0, "losses": 0, "total_pnl": 0.0})
+        pnl = t.get("total_profit") or 0
+        e["total_pnl"] += pnl
+        if pnl > 0: e["wins"] += 1
+        else: e["losses"] += 1
+    by_type_result = sorted([
+        {"type": k, "wins": v["wins"], "losses": v["losses"],
+         "total": v["wins"]+v["losses"],
+         "win_rate": round(v["wins"]/(v["wins"]+v["losses"])*100, 1),
+         "total_pnl": round(v["total_pnl"], 2)}
+        for k, v in by_type.items()
+    ], key=lambda x: x["win_rate"], reverse=True)
+
+    by_reason: dict = {}
+    for t in closed_trades:
+        r = t.get("close_reason") or "unknown"
+        e = by_reason.setdefault(r, {"count": 0, "total_pnl": 0.0})
+        e["count"] += 1
+        e["total_pnl"] += t.get("total_profit") or 0
+    by_reason_result = sorted([
+        {"reason": k, "count": v["count"], "total_pnl": round(v["total_pnl"], 2)}
+        for k, v in by_reason.items()
+    ], key=lambda x: x["count"], reverse=True)
+
+    by_regime: dict = {}
+    for t in closed_trades:
+        reg = t.get("regime") or "Unknown"
+        e = by_regime.setdefault(reg, {"wins": 0, "losses": 0})
+        pnl = t.get("total_profit") or 0
+        if pnl > 0: e["wins"] += 1
+        else: e["losses"] += 1
+    by_regime_result = sorted([
+        {"regime": k, "total": v["wins"]+v["losses"],
+         "wins": v["wins"], "losses": v["losses"],
+         "win_rate": round(v["wins"]/(v["wins"]+v["losses"])*100, 1)}
+        for k, v in by_regime.items()
+    ], key=lambda x: x["win_rate"], reverse=True)
+
+    _dte_keys = ["<14", "14-21", "22-30", "31-45", ">45"]
+    dte_buckets: dict = {k: {"wins": 0, "losses": 0} for k in _dte_keys}
+    for t in closed_trades:
+        dte = t.get("dte_at_entry") or 0
+        if dte < 14: key = "<14"
+        elif dte <= 21: key = "14-21"
+        elif dte <= 30: key = "22-30"
+        elif dte <= 45: key = "31-45"
+        else: key = ">45"
+        pnl = t.get("total_profit") or 0
+        if pnl > 0: dte_buckets[key]["wins"] += 1
+        else: dte_buckets[key]["losses"] += 1
+    by_dte_result = [
+        {"bucket": k, "total": v["wins"]+v["losses"], "wins": v["wins"],
+         "win_rate": round(v["wins"]/(v["wins"]+v["losses"])*100, 1) if (v["wins"]+v["losses"]) > 0 else 0}
+        for k, v in dte_buckets.items() if (v["wins"]+v["losses"]) > 0
+    ]
+
+    suggestions = _analysis_suggestions(closed_trades, by_type_result, by_reason_result, by_regime_result, by_dte_result)
+
+    return {
+        "has_data": True,
+        "total_trades": len(closed_trades),
+        "by_type": by_type_result,
+        "by_reason": by_reason_result,
+        "by_regime": by_regime_result,
+        "by_dte": by_dte_result,
+        "suggestions": suggestions,
+    }
+
+
 def _pipeline_is_running() -> bool:
     global _pipeline_proc
     return _pipeline_proc is not None and _pipeline_proc.poll() is None
@@ -902,7 +1071,8 @@ nav { background: var(--surface); border-bottom: 1px solid var(--border);
 .tab.active { background: var(--bg); color: var(--text); }
 
 .acct-bar { background: var(--surface); border-bottom: 1px solid var(--border);
-             padding: 10px 16px; display: flex; gap: 20px; flex-wrap: wrap; align-items: center; }
+             padding: 10px 16px; display: flex; gap: 20px; flex-wrap: wrap; align-items: center;
+             position: sticky; top: 52px; z-index: 99; }
 .acct-stat .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 .acct-stat .val { font-size: 15px; font-weight: 600; margin-top: 1px; }
 
@@ -1093,6 +1263,20 @@ nav { background: var(--surface); border-bottom: 1px solid var(--border);
             line-height: 1.6; color: #a8b0c8; white-space: pre-wrap; min-height: 200px; }
 
 /* Notes */
+/* Analysis */
+.suggestion { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px;
+              border-radius: 8px; margin-bottom: 8px; font-size: 13px; line-height: 1.5; }
+.suggestion.high   { background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.2); }
+.suggestion.medium { background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.2); }
+.suggestion.info   { background: rgba(59,130,246,.06); border: 1px solid rgba(59,130,246,.15); }
+.sug-icon { font-size: 16px; flex: none; }
+.analysis-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+.analysis-row { display: flex; justify-content: space-between; align-items: center;
+                 padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.analysis-row:last-child { border-bottom: none; }
+.analysis-wr { font-weight: 700; font-size: 14px; }
+.wr-high { color: var(--green); } .wr-mid { color: var(--yellow); } .wr-low { color: var(--red); }
+
 .notes-area { width: 100%; background: var(--bg); border: 1px solid var(--border);
                border-radius: 8px; color: var(--text); font-size: 13px; padding: 8px 10px;
                resize: vertical; min-height: 60px; margin-bottom: 10px;
@@ -1158,8 +1342,8 @@ def _page(active_tab: str, page_content: str) -> str:
     show_acct_bar = active_tab != "portfolio"
     acct_bar = """
 <div class="acct-bar">
-  <div class="acct-stat"><div class="lbl">Buying Power</div><div class="val" id="bp">—</div></div>
   <div class="acct-stat"><div class="lbl">Total Equity</div><div class="val" id="eq">—</div></div>
+  <div class="acct-stat"><div class="lbl">Buying Power</div><div class="val" id="bp">—</div></div>
 </div>""" if show_acct_bar else ""
     # Split HTML from JS so the <script> block is never nested inside the content div
     _parts = page_content.split("<!-- JS -->", 1)
@@ -1239,6 +1423,14 @@ _PORTFOLIO_CONTENT = """
 </div>
 <div id="ticker-empty" style="display:none" class="empty" style="padding:20px">
   <h3 style="font-size:14px;color:var(--muted)">No closed trades yet</h3>
+</div>
+
+<div class="section-hdr" style="display:flex;align-items:center;justify-content:space-between">
+  <span>Portfolio Analysis</span>
+  <button class="cf-btn" onclick="loadAnalysis()" style="text-transform:none;font-size:11px">Refresh</button>
+</div>
+<div id="analysis-body">
+  <div class="empty"><span class="spin"></span></div>
 </div>
 
 <div class="section-hdr">Trade History</div>
@@ -1453,6 +1645,103 @@ function buildTickerChart(byTicker) {
 }
 
 loadPortfolio();
+
+const _reasonLabel = {
+  profit_target: 'Profit Target', stop_loss: 'Stop Loss', trailing_stop: 'Trailing Stop',
+  time_stop: 'Time Stop', time_stop_eod: 'Time Stop EOD', manual_close: 'Manual Close', unknown: 'Unknown'
+};
+
+function wrClass(wr) { return wr >= 50 ? 'wr-high' : wr >= 35 ? 'wr-mid' : 'wr-low'; }
+function sugIcon(p) { return p === 'high' ? '🔴' : p === 'medium' ? '🟡' : 'ℹ️'; }
+
+function renderAnalysis(d) {
+  const el = document.getElementById('analysis-body');
+  if (!d.has_data || !d.total_trades) {
+    el.innerHTML = '<div class="empty" style="padding:24px"><div class="icon">📊</div><h3>No closed trades yet</h3><p>Analysis will appear once trades are closed.</p></div>';
+    return;
+  }
+  let html = '';
+
+  // Suggestions
+  html += '<div style="margin-bottom:16px">';
+  for (const s of d.suggestions) {
+    html += `<div class="suggestion ${s.priority}"><span class="sug-icon">${sugIcon(s.priority)}</span><span>${s.text}</span></div>`;
+  }
+  html += '</div>';
+
+  // By type + by regime side by side
+  html += '<div class="analysis-grid">';
+
+  // Trade Type breakdown
+  if (d.by_type.length) {
+    html += '<div class="chart-card"><div class="chart-hdr"><span class="title" style="font-size:13px">By Trade Type</span></div><div style="padding:8px 14px 12px">';
+    for (const r of d.by_type) {
+      const wc = wrClass(r.win_rate);
+      html += `<div class="analysis-row">
+        <span>${r.type}<br><span style="font-size:11px;color:var(--muted)">${r.total} trades</span></span>
+        <span class="analysis-wr ${wc}">${r.win_rate}%</span>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  // By Regime
+  if (d.by_regime.length) {
+    html += '<div class="chart-card"><div class="chart-hdr"><span class="title" style="font-size:13px">By Regime</span></div><div style="padding:8px 14px 12px">';
+    for (const r of d.by_regime) {
+      const wc = wrClass(r.win_rate);
+      html += `<div class="analysis-row">
+        <span>${r.regime}<br><span style="font-size:11px;color:var(--muted)">${r.total} trades</span></span>
+        <span class="analysis-wr ${wc}">${r.win_rate}%</span>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  html += '</div>';
+
+  // DTE + Close Reason
+  html += '<div class="analysis-grid">';
+
+  if (d.by_dte.length) {
+    html += '<div class="chart-card"><div class="chart-hdr"><span class="title" style="font-size:13px">By DTE at Entry</span></div><div style="padding:8px 14px 12px">';
+    for (const r of d.by_dte) {
+      const wc = wrClass(r.win_rate);
+      html += `<div class="analysis-row">
+        <span>${r.bucket} days<br><span style="font-size:11px;color:var(--muted)">${r.total} trades</span></span>
+        <span class="analysis-wr ${wc}">${r.win_rate}%</span>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  if (d.by_reason.length) {
+    html += '<div class="chart-card"><div class="chart-hdr"><span class="title" style="font-size:13px">Exit Reason Breakdown</span></div><div style="padding:8px 14px 12px">';
+    for (const r of d.by_reason) {
+      const pnlCls = r.total_pnl >= 0 ? 'green' : 'red';
+      html += `<div class="analysis-row">
+        <span>${_reasonLabel[r.reason] || r.reason}<br><span style="font-size:11px;color:var(--muted)">${r.count} trades</span></span>
+        <span class="${pnlCls}" style="font-weight:700;font-size:13px">${fmt(r.total_pnl)}</span>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+async function loadAnalysis() {
+  const el = document.getElementById('analysis-body');
+  el.innerHTML = '<div class="empty" style="padding:20px"><span class="spin"></span></div>';
+  try {
+    const d = await fetch('/api/portfolio/analysis').then(r => r.json());
+    renderAnalysis(d);
+  } catch(e) {
+    el.innerHTML = `<div class="empty" style="padding:20px"><div class="icon">⚠️</div><h3>Error</h3><p>${e.message}</p></div>`;
+  }
+}
+loadAnalysis();
 </script>
 """
 

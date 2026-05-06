@@ -14,6 +14,30 @@ _venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", 
 if os.path.exists(_venv_python) and os.path.abspath(sys.executable) != os.path.abspath(_venv_python):
     os.execv(_venv_python, [_venv_python] + sys.argv)
 
+_TWILIO_SID   = os.getenv("TWILIO_SID", "")
+_TWILIO_TOKEN = os.getenv("TWILIO_TOKEN", "")
+_TWILIO_FROM  = os.getenv("TWILIO_FROM", "")
+_TWILIO_TO    = os.getenv("TWILIO_TO", "")
+
+def send_sms(body: str):
+    if not all([_TWILIO_SID, _TWILIO_TOKEN, _TWILIO_FROM, _TWILIO_TO]):
+        print(f"[SMS] Twilio not configured — skipping: {body}")
+        return
+    try:
+        import urllib.request, urllib.parse
+        data = urllib.parse.urlencode({"From": _TWILIO_FROM, "To": _TWILIO_TO, "Body": body}).encode()
+        req = urllib.request.Request(
+            f"https://api.twilio.com/2010-04-01/Accounts/{_TWILIO_SID}/Messages.json",
+            data=data,
+        )
+        import base64
+        creds = base64.b64encode(f"{_TWILIO_SID}:{_TWILIO_TOKEN}".encode()).decode()
+        req.add_header("Authorization", f"Basic {creds}")
+        urllib.request.urlopen(req, timeout=10)
+        print(f"[SMS] Sent: {body}")
+    except Exception as e:
+        print(f"[SMS] Failed: {e}")
+
 def run_step(step_name, script_path, description):
     print("\n" + "="*80)
     print(f"▶ {step_name}: {description}")
@@ -68,12 +92,16 @@ def main():
             completed += 1
             time.sleep(0.3)
         else:
+            send_sms(f"DickTrades ❌ Pipeline FAILED at step {step_name} ({desc}) — {datetime.now().strftime('%H:%M')}")
             break
 
     elapsed = time.time() - start
+    success = completed == len(steps)
     print("\n" + "="*80)
-    print(f"{'✅ COMPLETE' if completed == len(steps) else '❌ STOPPED'}: {completed}/{len(steps)} ({elapsed:.1f}s)")
+    print(f"{'✅ COMPLETE' if success else '❌ STOPPED'}: {completed}/{len(steps)} ({elapsed:.1f}s)")
     print("="*80)
+    if success:
+        send_sms(f"DickTrades ✅ Pipeline complete — {completed} steps in {elapsed:.0f}s")
 
 if __name__ == "__main__":
     main()
