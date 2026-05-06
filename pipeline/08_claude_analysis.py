@@ -257,7 +257,7 @@ def main():
     try:
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=4096,
+            max_tokens=8192,
             system=(
                 "You analyze credit spreads with structured 5W1H news analysis. "
                 "Each trade shows a QUANT DECISION (ENTER/WATCH/SKIP) computed by a quantitative engine "
@@ -267,7 +267,10 @@ def main():
                 "If quant says SKIP, your default should also be Skip unless there is a strong newsflow reason to reconsider. "
                 "If quant says ENTER and news is clean, confirm Trade. "
                 "Extract specific dates, events, and entities from headlines. Assign risk heat scores 1-10. "
-                "Be specific with dates and events."
+                "Be specific with dates and events. "
+                "CRITICAL: Never invent or assume catalyst dates (earnings, FDA decisions, etc.) that do not appear "
+                "explicitly in the provided news headlines or summaries. If no specific date is visible in the data, "
+                "write 'None identified' in CATALYST RISK — do not guess, estimate, or recall dates from training data."
             ),
             messages=[
                 {"role": "user", "content": prompt}
