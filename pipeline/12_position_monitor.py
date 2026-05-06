@@ -52,8 +52,8 @@ def send_sms(body: str):
 _session = get_tradier_session()  # SSL-verified session for Tradier API
 
 # ── Market hours (ET) ──────────────────────────────────────────
-MARKET_OPEN_HOUR  = 9
-MARKET_OPEN_MIN   = 35   # 5 min after open to avoid chaos
+MARKET_OPEN_HOUR  = 10
+MARKET_OPEN_MIN   = 0    # 30 min after open to avoid wide bid-ask and gap-out stops
 MARKET_CLOSE_HOUR = 15
 MARKET_CLOSE_MIN  = 55   # 5 min before close
 

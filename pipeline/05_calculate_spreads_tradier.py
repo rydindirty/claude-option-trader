@@ -98,16 +98,16 @@ def calculate_spreads():
                     
                     short_iv = short_strike["put_greeks"]["iv"]
                     short_delta = abs(short_strike["put_greeks"]["delta"])
-                    
-                    if short_delta < 0.15 or short_delta > 0.35:
+
+                    if short_delta < 0.15 or short_delta > 0.28:
                         continue
-                    
+
                     short_bid = short_strike.get("put_bid", 0)
                     long_ask = long_strike.get("put_ask", 0)
-                    
+
                     if short_bid <= 0 or long_ask <= 0:
                         continue
-                    
+
                     net_credit = short_bid - long_ask
                     width = short_strike["strike"] - long_strike["strike"]
 
@@ -120,11 +120,14 @@ def calculate_spreads():
                     if width > 25:
                         continue
 
-                    # Require minimum absolute credit of $0.60.
-                    # At 1.5x stop this guarantees a $0.30 buffer above entry —
-                    # enough to clear normal bid-ask noise on either leg.
+                    # Require minimum absolute credit of $0.60 AND at least
+                    # 25% credit-to-width ratio. Both must pass: the absolute
+                    # floor screens out zero-premium junk; the ratio floor
+                    # ensures enough cushion before the 1.5x stop fires.
                     credit_pct = net_credit / width  # stored for display/ranking
                     if net_credit < 0.60:
+                        continue
+                    if credit_pct < 0.25:
                         continue
 
                     max_loss = width - net_credit
@@ -169,28 +172,31 @@ def calculate_spreads():
                     
                     short_iv = short_strike["call_greeks"]["iv"]
                     short_delta = abs(short_strike["call_greeks"]["delta"])
-                    
-                    if short_delta < 0.15 or short_delta > 0.35:
+
+                    if short_delta < 0.15 or short_delta > 0.28:
                         continue
-                    
+
                     short_bid = short_strike.get("call_bid", 0)
                     long_ask = long_strike.get("call_ask", 0)
-                    
+
                     if short_bid <= 0 or long_ask <= 0:
                         continue
-                    
+
                     net_credit = short_bid - long_ask
                     width = long_strike["strike"] - short_strike["strike"]
 
                     if net_credit <= 0 or width <= 0:
                         continue
 
-                    # Same $25 max width and $0.60 min credit rules as Bull Puts
+                    # Same $25 max width, $0.60 min credit, and 25% credit-to-width
+                    # rules as Bull Puts. Both credit filters must pass.
                     if width > 25:
                         continue
 
                     credit_pct = net_credit / width  # stored for display/ranking
                     if net_credit < 0.60:
+                        continue
+                    if credit_pct < 0.25:
                         continue
 
                     max_loss = width - net_credit
