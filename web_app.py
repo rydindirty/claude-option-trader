@@ -431,7 +431,7 @@ def save_placed_trade(trade, contracts, order_response, status: str = "pending")
         "long_symbol": build_option_symbol(ticker, expiration, opt_type, long_strike),
         "tradier_order_id": order_response.get("order", {}).get("id", "unknown"),
         "opened_at": datetime.now().isoformat(),
-        "profit_target_pct": 0.40,
+        "profit_target_pct": 0.50,
         "stop_loss_pct": 1.50,
         "regime": _read_regime(),
     }, status=status)

@@ -99,7 +99,7 @@ def calculate_spreads():
                     short_iv = short_strike["put_greeks"]["iv"]
                     short_delta = abs(short_strike["put_greeks"]["delta"])
 
-                    if short_delta < 0.15 or short_delta > 0.28:
+                    if short_delta < 0.12 or short_delta > 0.22:
                         continue
 
                     short_bid = short_strike.get("put_bid", 0)
@@ -120,14 +120,11 @@ def calculate_spreads():
                     if width > 25:
                         continue
 
-                    # Require minimum absolute credit of $0.60 AND at least
-                    # 25% credit-to-width ratio. Both must pass: the absolute
-                    # floor screens out zero-premium junk; the ratio floor
-                    # ensures enough cushion before the 1.5x stop fires.
+                    # Require minimum absolute credit of $0.60.
+                    # No credit/width ratio floor — at delta 0.12–0.22 (high PoP),
+                    # ratios are naturally thin; ROI threshold in step 6 handles quality.
                     credit_pct = net_credit / width  # stored for display/ranking
                     if net_credit < 0.60:
-                        continue
-                    if credit_pct < 0.25:
                         continue
 
                     max_loss = width - net_credit
@@ -173,7 +170,7 @@ def calculate_spreads():
                     short_iv = short_strike["call_greeks"]["iv"]
                     short_delta = abs(short_strike["call_greeks"]["delta"])
 
-                    if short_delta < 0.15 or short_delta > 0.28:
+                    if short_delta < 0.12 or short_delta > 0.22:
                         continue
 
                     short_bid = short_strike.get("call_bid", 0)
@@ -188,15 +185,13 @@ def calculate_spreads():
                     if net_credit <= 0 or width <= 0:
                         continue
 
-                    # Same $25 max width, $0.60 min credit, and 25% credit-to-width
-                    # rules as Bull Puts. Both credit filters must pass.
+                    # Same $25 max width and $0.60 min credit as Bull Puts.
+                    # No credit/width ratio floor — ROI threshold in step 6 handles quality.
                     if width > 25:
                         continue
 
                     credit_pct = net_credit / width  # stored for display/ranking
                     if net_credit < 0.60:
-                        continue
-                    if credit_pct < 0.25:
                         continue
 
                     max_loss = width - net_credit

@@ -59,10 +59,10 @@ _NEUTRAL = {
     "preferred_type":       None,
     "bull_put_multiplier":  1.0,
     "bear_call_multiplier": 1.0,
-    "enter_pop":            68,
-    "enter_roi":            15,
-    "watch_pop":            68,   # PoP floor is 68% — WATCH catches ROI 10–14%
-    "watch_roi":            10,
+    "enter_pop":            72,
+    "enter_roi":            8,
+    "watch_pop":            72,   # PoP floor is 72% — WATCH catches ROI 5–7%
+    "watch_roi":            5,
     "regime_note":          ""
 }
 
@@ -77,10 +77,10 @@ def load_macro_regime():
             "preferred_type":       data.get("preferred_spread_type"),
             "bull_put_multiplier":  adj.get("bull_put_multiplier", 1.0),
             "bear_call_multiplier": adj.get("bear_call_multiplier", 1.0),
-            "enter_pop":            adj.get("enter_pop", 70),
-            "enter_roi":            adj.get("enter_roi", 20),
-            "watch_pop":            adj.get("watch_pop", 70),
-            "watch_roi":            adj.get("watch_roi", 15),
+            "enter_pop":            adj.get("enter_pop", 72),
+            "enter_roi":            adj.get("enter_roi", 8),
+            "watch_pop":            adj.get("watch_pop", 72),
+            "watch_roi":            adj.get("watch_roi", 5),
             "regime_note":          data.get("regime_note", ""),
             "block_bull_puts":      data.get("block_bull_puts", False),
             "vix_shock_reason":     data.get("vix_shock_reason"),

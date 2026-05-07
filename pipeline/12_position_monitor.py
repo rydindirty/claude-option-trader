@@ -2,8 +2,8 @@
 Step 12: Position Monitor
 Runs every 5 minutes during market hours. Checks all open
 positions against four exit rules:
-  1. Profit target  — close when spread value drops to 60% of
-                      credit received (40% profit locked in)
+  1. Profit target  — close when spread value drops to 50% of
+                      credit received (50% profit locked in)
   2. Stop loss      — close when spread costs 1.5x the credit to close
   3. Width hard cap — close if spread value exceeds 80% of max width
                       (gap-through protection regardless of other rules)
@@ -487,7 +487,7 @@ def run_monitor(interval_minutes=1):
           f"{MARKET_CLOSE_HOUR}:{MARKET_CLOSE_MIN:02d} ET")
     print(f"   Open positions in DB: {len(open_positions)}")
     print(f"   Exit rules:")
-    print(f"     Profit target: 40% of max credit")
+    print(f"     Profit target: 50% of max credit")
     print(f"     Stop loss:     {STOP_LOSS_MULT}x credit received")
     print(f"     Width cap:     {int(MAX_WIDTH_PCT*100)}% of spread width (gap protection)")
     print(f"     Time stop:     hard close at DTE < 21")
