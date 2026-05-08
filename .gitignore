@@ -6,6 +6,8 @@ config.py
 data/*.json
 data/*.csv
 data/stocks.py
+# Strategy params is a config file — keep it in the repo
+!data/strategy_params.json
 
 # Python
 __pycache__/

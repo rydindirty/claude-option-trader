@@ -1,0 +1,10 @@
+{
+  "min_delta": 0.12,
+  "max_delta": 0.22,
+  "min_credit": 1.00,
+  "enter_pop": 72,
+  "enter_roi": 8,
+  "watch_pop": 72,
+  "watch_roi": 5,
+  "_note": "Live strategy parameters. Edited by the Strategy Review tab — do NOT hand-edit. Commit these values to the pipeline defaults before returning to live trading."
+}

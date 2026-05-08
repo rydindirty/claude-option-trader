@@ -103,5 +103,21 @@ def main():
     if success:
         send_sms(f"DickTrades ✅ Pipeline complete — {completed} steps in {elapsed:.0f}s")
 
+        # In paper trading mode, auto-select and place trades
+        paper_mode = os.getenv("PAPER_TRADING", "0").strip().lower() in ("1", "true", "yes")
+        if paper_mode:
+            print("\n" + "="*80)
+            print("▶ PAPER AUTO TRADER — selecting trades")
+            print("="*80)
+            auto_trader = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_auto_trader.py")
+            subprocess.run([sys.executable, auto_trader])
+
+            # Run strategy review if enough trades have closed
+            print("\n" + "="*80)
+            print("▶ STRATEGY REVIEW — checking for optimization opportunities")
+            print("="*80)
+            strategy_review = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_strategy_review.py")
+            subprocess.run([sys.executable, strategy_review])
+
 if __name__ == "__main__":
     main()

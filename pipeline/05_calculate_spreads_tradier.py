@@ -11,6 +11,18 @@ from scipy.stats import norm
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PARAMS_FILE = os.path.join(_PROJECT_ROOT, "data", "strategy_params.json")
+_PARAM_DEFAULTS = {"min_delta": 0.12, "max_delta": 0.22, "min_credit": 1.00}
+
+def _load_params() -> dict:
+    try:
+        with open(_PARAMS_FILE) as f:
+            p = json.load(f)
+        return {**_PARAM_DEFAULTS, **p}
+    except Exception:
+        return _PARAM_DEFAULTS
+
 def black_scholes_pop(stock_price, strike, dte, iv, is_call, delta=None):
     # Fall back to delta-based PoP if IV is not available
     if iv <= 0 or dte <= 0:
@@ -34,7 +46,13 @@ def calculate_spreads():
     print("="*60)
     print("STEP 5: Calculate Spreads (Black-Scholes)")
     print("="*60)
-    
+
+    params = _load_params()
+    MIN_DELTA  = params["min_delta"]
+    MAX_DELTA  = params["max_delta"]
+    MIN_CREDIT = params["min_credit"]
+    print(f"   Params: delta {MIN_DELTA}–{MAX_DELTA} | min_credit ${MIN_CREDIT:.2f}")
+
     with open("data/chains_with_greeks.json", "r") as f:
         data = json.load(f)
     chains = data["chains_with_greeks"]
@@ -99,7 +117,7 @@ def calculate_spreads():
                     short_iv = short_strike["put_greeks"]["iv"]
                     short_delta = abs(short_strike["put_greeks"]["delta"])
 
-                    if short_delta < 0.12 or short_delta > 0.22:
+                    if short_delta < MIN_DELTA or short_delta > MAX_DELTA:
                         continue
 
                     short_bid = short_strike.get("put_bid", 0)
@@ -114,17 +132,11 @@ def calculate_spreads():
                     if net_credit <= 0 or width <= 0:
                         continue
 
-                    # Cap spread width at $25 — anything wider is impractical
-                    # (excess margin, outsized loss per contract) and is only
-                    # reached by pairing distant OTM legs with tiny premiums.
                     if width > 25:
                         continue
 
-                    # Require minimum absolute credit of $0.60.
-                    # No credit/width ratio floor — at delta 0.12–0.22 (high PoP),
-                    # ratios are naturally thin; ROI threshold in step 6 handles quality.
                     credit_pct = net_credit / width  # stored for display/ranking
-                    if net_credit < 1.00:
+                    if net_credit < MIN_CREDIT:
                         continue
 
                     max_loss = width - net_credit
@@ -170,7 +182,7 @@ def calculate_spreads():
                     short_iv = short_strike["call_greeks"]["iv"]
                     short_delta = abs(short_strike["call_greeks"]["delta"])
 
-                    if short_delta < 0.12 or short_delta > 0.22:
+                    if short_delta < MIN_DELTA or short_delta > MAX_DELTA:
                         continue
 
                     short_bid = short_strike.get("call_bid", 0)
@@ -185,13 +197,11 @@ def calculate_spreads():
                     if net_credit <= 0 or width <= 0:
                         continue
 
-                    # Same $25 max width and $0.60 min credit as Bull Puts.
-                    # No credit/width ratio floor — ROI threshold in step 6 handles quality.
                     if width > 25:
                         continue
 
                     credit_pct = net_credit / width  # stored for display/ranking
-                    if net_credit < 1.00:
+                    if net_credit < MIN_CREDIT:
                         continue
 
                     max_loss = width - net_credit

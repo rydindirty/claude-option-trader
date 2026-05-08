@@ -46,6 +46,18 @@ from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PARAMS_FILE  = os.path.join(_PROJECT_ROOT, "data", "strategy_params.json")
+
+def _load_strategy_params() -> dict:
+    defaults = {"enter_pop": 72, "enter_roi": 8, "watch_pop": 72, "watch_roi": 5}
+    try:
+        with open(_PARAMS_FILE) as f:
+            p = json.load(f)
+        return {**defaults, **p}
+    except Exception:
+        return defaults
+
 _TECH_MULTIPLIERS = {
     "strong_bullish": {"Bull Put": 1.15, "Bear Call": 0.85},
     "bullish":        {"Bull Put": 1.08, "Bear Call": 0.93},
@@ -54,20 +66,24 @@ _TECH_MULTIPLIERS = {
     "strong_bearish": {"Bull Put": 0.85, "Bear Call": 1.15},
 }
 
-_NEUTRAL = {
-    "regime_label":         "Neutral",
-    "preferred_type":       None,
-    "bull_put_multiplier":  1.0,
-    "bear_call_multiplier": 1.0,
-    "enter_pop":            72,
-    "enter_roi":            8,
-    "watch_pop":            72,   # PoP floor is 72% — WATCH catches ROI 5–7%
-    "watch_roi":            5,
-    "regime_note":          ""
-}
+def _neutral_regime() -> dict:
+    """Build the neutral-regime fallback using live strategy params."""
+    p = _load_strategy_params()
+    return {
+        "regime_label":         "Neutral",
+        "preferred_type":       None,
+        "bull_put_multiplier":  1.0,
+        "bear_call_multiplier": 1.0,
+        "enter_pop":            p["enter_pop"],
+        "enter_roi":            p["enter_roi"],
+        "watch_pop":            p["watch_pop"],
+        "watch_roi":            p["watch_roi"],
+        "regime_note":          "",
+    }
 
 
 def load_macro_regime():
+    p = _load_strategy_params()
     try:
         with open("data/macro_regime.json", "r") as f:
             data = json.load(f)
@@ -77,17 +93,17 @@ def load_macro_regime():
             "preferred_type":       data.get("preferred_spread_type"),
             "bull_put_multiplier":  adj.get("bull_put_multiplier", 1.0),
             "bear_call_multiplier": adj.get("bear_call_multiplier", 1.0),
-            "enter_pop":            adj.get("enter_pop", 72),
-            "enter_roi":            adj.get("enter_roi", 8),
-            "watch_pop":            adj.get("watch_pop", 72),
-            "watch_roi":            adj.get("watch_roi", 5),
+            "enter_pop":            adj.get("enter_pop", p["enter_pop"]),
+            "enter_roi":            adj.get("enter_roi", p["enter_roi"]),
+            "watch_pop":            adj.get("watch_pop", p["watch_pop"]),
+            "watch_roi":            adj.get("watch_roi", p["watch_roi"]),
             "regime_note":          data.get("regime_note", ""),
             "block_bull_puts":      data.get("block_bull_puts", False),
             "vix_shock_reason":     data.get("vix_shock_reason"),
         }
     except FileNotFoundError:
         print("   ⚠️  macro_regime.json not found — using neutral defaults")
-        return _NEUTRAL
+        return _neutral_regime()
 
 
 def load_technicals():
