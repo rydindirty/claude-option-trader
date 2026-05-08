@@ -124,7 +124,7 @@ def calculate_spreads():
                     # No credit/width ratio floor — at delta 0.12–0.22 (high PoP),
                     # ratios are naturally thin; ROI threshold in step 6 handles quality.
                     credit_pct = net_credit / width  # stored for display/ranking
-                    if net_credit < 0.60:
+                    if net_credit < 1.00:
                         continue
 
                     max_loss = width - net_credit
@@ -191,7 +191,7 @@ def calculate_spreads():
                         continue
 
                     credit_pct = net_credit / width  # stored for display/ranking
-                    if net_credit < 0.60:
+                    if net_credit < 1.00:
                         continue
 
                     max_loss = width - net_credit

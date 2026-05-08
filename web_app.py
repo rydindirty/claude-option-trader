@@ -26,11 +26,12 @@ from config import (TRADIER_TOKEN, TRADIER_ENV, get_tradier_session,
                     TRADIER_BASE_URL, TRADIER_HEADERS, TRADIER_ACCOUNT_ID,
                     WEB_USERNAME, WEB_PASSWORD, SESSION_SECRET)
 
-ALERT_EMAIL = os.getenv("ALERT_EMAIL", "")
-SMTP_HOST   = os.getenv("SMTP_HOST", "")
-SMTP_PORT   = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER   = os.getenv("SMTP_USER", "")
-SMTP_PASS   = os.getenv("SMTP_PASS", "")
+ALERT_EMAIL   = os.getenv("ALERT_EMAIL", "")
+SMTP_HOST     = os.getenv("SMTP_HOST", "")
+SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER     = os.getenv("SMTP_USER", "")
+SMTP_PASS     = os.getenv("SMTP_PASS", "")
+PAPER_TRADING = os.getenv("PAPER_TRADING", "0").strip().lower() in ("1", "true", "yes")
 
 _TWILIO_SID   = os.getenv("TWILIO_SID", "")
 _TWILIO_TOKEN = os.getenv("TWILIO_TOKEN", "")
@@ -604,6 +605,16 @@ async def api_approve(request: Request, ticker: str, req: ApproveRequest):
     trade = next((t for t in trades if t["ticker"].upper() == ticker.upper()), None)
     if not trade:
         raise HTTPException(404, f"No trade found for {ticker}")
+
+    # ── Paper trading mode — log trade to DB, skip all Tradier API calls ──
+    if PAPER_TRADING:
+        mock_response = {"order": {"id": f"PAPER-{ticker}-{int(datetime.now().timestamp())}", "status": "filled"}}
+        row_id = save_placed_trade(trade, req.contracts, mock_response, status="open")
+        note = "[PAPER TRADE]" + (f" {req.notes.strip()}" if req.notes.strip() else "")
+        db.save_trade_notes(row_id, note)
+        return {"success": True, "order_id": mock_response["order"]["id"],
+                "status": "paper_filled", "db_row": row_id,
+                "preview": {"status": "paper", "commission": 0}}
 
     preview_info = None
     try:
@@ -1360,13 +1371,14 @@ def _page(active_tab: str, page_content: str) -> str:
 </head>
 <body>
 <nav>
-  <div class="logo">Dick<span>Trades</span></div>
+  <div class="logo">Dick<span>Trades</span>{"&nbsp;<span style='background:#f59e0b;color:#000;font-size:0.65rem;font-weight:700;padding:2px 7px;border-radius:4px;vertical-align:middle;letter-spacing:0.05em'>PAPER</span>" if PAPER_TRADING else ""}</div>
   <div class="tabs">
     <a href="/portfolio" class="tab {portfolio_cls}">Portfolio</a>
     <a href="/approval"  class="tab {approval_cls}">Approval</a>
     <a href="/positions" class="tab {positions_cls}">Positions</a>
   </div>
 </nav>
+{"<div style='background:#f59e0b;color:#000;text-align:center;font-size:0.8rem;font-weight:700;padding:6px;letter-spacing:0.05em'>📄 PAPER TRADING MODE — No real orders are being placed</div>" if PAPER_TRADING else ""}
 {acct_bar}
 <div class="content content-{active_tab}">{html_part}</div>
 <div id="toast"></div>

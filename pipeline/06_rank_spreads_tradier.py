@@ -198,8 +198,28 @@ def rank_spreads():
         spread["kronos_direction"]  = kronos_ticker.get("direction", "n/a")
         spread["kronos_forecast_pct"] = kronos_ticker.get("forecast_pct", 0.0)
 
+        # ── Kronos hard block ──────────────────────────────────────────────────
+        # If Kronos strongly forecasts a move that OPPOSES the spread direction,
+        # force SKIP regardless of PoP/ROI. A 0.80× multiplier is not enough
+        # when the forecast is 5%+ against the trade (e.g. -10.77% on a Bull Put).
+        # Bull Put needs stock to stay UP  → bearish forecast ≥5% = hard block
+        # Bear Call needs stock to stay DN → bullish forecast ≥5% = hard block
+        kronos_dir = kronos_ticker.get("direction", "neutral")
+        kronos_fc  = kronos_ticker.get("forecast_pct", 0.0)
+        kronos_blocked = False
+        if spread_type == "Bull Put" and kronos_dir == "bearish" and abs(kronos_fc) >= 5.0:
+            spread["decision"]    = "SKIP"
+            spread["skip_reason"] = f"Kronos {kronos_fc:+.1f}% bearish — opposes Bull Put"
+            kronos_blocked = True
+        elif spread_type == "Bear Call" and kronos_dir == "bullish" and abs(kronos_fc) >= 5.0:
+            spread["decision"]    = "SKIP"
+            spread["skip_reason"] = f"Kronos {kronos_fc:+.1f}% bullish — opposes Bear Call"
+            kronos_blocked = True
+
         # Regime-adjusted ENTER / WATCH / SKIP thresholds
-        if regime.get("block_bull_puts") and spread_type == "Bull Put":
+        if kronos_blocked:
+            pass  # decision already set above
+        elif regime.get("block_bull_puts") and spread_type == "Bull Put":
             spread["decision"] = "SKIP"
             spread["skip_reason"] = "VIX shock — Bull Put entries blocked"
         elif spread["pop"] >= regime["enter_pop"] and spread["roi"] >= regime["enter_roi"]:
