@@ -70,10 +70,10 @@ REGIME_CONFIG = {
         "preferred_type":       "Bull Put",
         "bull_put_multiplier":  1.15,
         "bear_call_multiplier": 0.90,
-        "enter_pop":            68,
-        "enter_roi":            18,
-        "watch_pop":            68,   # PoP floor is 68%; WATCH catches ROI 13–17%
-        "watch_roi":            13,
+        "enter_pop":            72,
+        "enter_roi":            8,
+        "watch_pop":            72,   # PoP floor 72%; WATCH catches ROI 5–7%
+        "watch_roi":            5,
         "note": (
             "Goldilocks regime — low volatility, steady growth, benign inflation. "
             "Theta and upward drift favor Bull Puts."
@@ -84,10 +84,10 @@ REGIME_CONFIG = {
         "preferred_type":       None,
         "bull_put_multiplier":  1.0,
         "bear_call_multiplier": 1.0,
-        "enter_pop":            68,
-        "enter_roi":            15,
-        "watch_pop":            68,   # PoP floor is 68%; WATCH catches ROI 10–14%
-        "watch_roi":            10,
+        "enter_pop":            72,
+        "enter_roi":            8,
+        "watch_pop":            72,   # PoP floor 72%; WATCH catches ROI 5–7%
+        "watch_roi":            5,
         "note": (
             "Neutral regime — balanced macro signals. "
             "No spread-type preference; standard thresholds apply."
@@ -98,13 +98,13 @@ REGIME_CONFIG = {
         "preferred_type":       "Bear Call",
         "bull_put_multiplier":  0.90,
         "bear_call_multiplier": 1.10,
-        "enter_pop":            72,
-        "enter_roi":            22,
-        "watch_pop":            68,   # PoP floor is 68%; WATCH catches ROI 17–21%
-        "watch_roi":            17,
+        "enter_pop":            74,
+        "enter_roi":            10,
+        "watch_pop":            72,   # PoP floor 72%; WATCH catches ROI 6–9%
+        "watch_roi":            6,
         "note": (
             "Slowing growth regime — rising downside risk. "
-            "Favor Bear Calls; tighten entry thresholds."
+            "Favor Bear Calls; require slightly higher PoP."
         )
     },
     "contraction": {
@@ -113,9 +113,9 @@ REGIME_CONFIG = {
         "bull_put_multiplier":  0.80,
         "bear_call_multiplier": 1.20,
         "enter_pop":            75,
-        "enter_roi":            25,
-        "watch_pop":            68,   # PoP floor is 68%; WATCH catches 68–74% PoP or ROI 20–24%
-        "watch_roi":            20,
+        "enter_roi":            12,
+        "watch_pop":            72,   # PoP floor 72%; WATCH catches ROI 8–11%
+        "watch_roi":            8,
         "note": (
             "Contraction regime — elevated downside risk, high VIX. "
             "Strongly prefer Bear Calls; require high PoP."
@@ -127,9 +127,9 @@ REGIME_CONFIG = {
         "bull_put_multiplier":  0.80,
         "bear_call_multiplier": 1.20,
         "enter_pop":            75,
-        "enter_roi":            25,
-        "watch_pop":            68,   # PoP floor is 68%; WATCH catches 68–74% PoP or ROI 20–24%
-        "watch_roi":            20,
+        "enter_roi":            12,
+        "watch_pop":            72,   # PoP floor 72%; WATCH catches ROI 8–11%
+        "watch_roi":            8,
         "note": (
             "Stagflation regime — slowing/contracting growth AND hot inflation. "
             "Most adverse for equities; strongly prefer Bear Calls."

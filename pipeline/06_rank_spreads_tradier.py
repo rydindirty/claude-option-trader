@@ -46,6 +46,18 @@ from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PARAMS_FILE  = os.path.join(_PROJECT_ROOT, "data", "strategy_params.json")
+
+def _load_strategy_params() -> dict:
+    defaults = {"enter_pop": 72, "enter_roi": 8, "watch_pop": 72, "watch_roi": 5}
+    try:
+        with open(_PARAMS_FILE) as f:
+            p = json.load(f)
+        return {**defaults, **p}
+    except Exception:
+        return defaults
+
 _TECH_MULTIPLIERS = {
     "strong_bullish": {"Bull Put": 1.15, "Bear Call": 0.85},
     "bullish":        {"Bull Put": 1.08, "Bear Call": 0.93},
@@ -54,20 +66,24 @@ _TECH_MULTIPLIERS = {
     "strong_bearish": {"Bull Put": 0.85, "Bear Call": 1.15},
 }
 
-_NEUTRAL = {
-    "regime_label":         "Neutral",
-    "preferred_type":       None,
-    "bull_put_multiplier":  1.0,
-    "bear_call_multiplier": 1.0,
-    "enter_pop":            68,
-    "enter_roi":            15,
-    "watch_pop":            68,   # PoP floor is 68% — WATCH catches ROI 10–14%
-    "watch_roi":            10,
-    "regime_note":          ""
-}
+def _neutral_regime() -> dict:
+    """Build the neutral-regime fallback using live strategy params."""
+    p = _load_strategy_params()
+    return {
+        "regime_label":         "Neutral",
+        "preferred_type":       None,
+        "bull_put_multiplier":  1.0,
+        "bear_call_multiplier": 1.0,
+        "enter_pop":            p["enter_pop"],
+        "enter_roi":            p["enter_roi"],
+        "watch_pop":            p["watch_pop"],
+        "watch_roi":            p["watch_roi"],
+        "regime_note":          "",
+    }
 
 
 def load_macro_regime():
+    p = _load_strategy_params()
     try:
         with open("data/macro_regime.json", "r") as f:
             data = json.load(f)
@@ -77,17 +93,17 @@ def load_macro_regime():
             "preferred_type":       data.get("preferred_spread_type"),
             "bull_put_multiplier":  adj.get("bull_put_multiplier", 1.0),
             "bear_call_multiplier": adj.get("bear_call_multiplier", 1.0),
-            "enter_pop":            adj.get("enter_pop", 70),
-            "enter_roi":            adj.get("enter_roi", 20),
-            "watch_pop":            adj.get("watch_pop", 70),
-            "watch_roi":            adj.get("watch_roi", 15),
+            "enter_pop":            adj.get("enter_pop", p["enter_pop"]),
+            "enter_roi":            adj.get("enter_roi", p["enter_roi"]),
+            "watch_pop":            adj.get("watch_pop", p["watch_pop"]),
+            "watch_roi":            adj.get("watch_roi", p["watch_roi"]),
             "regime_note":          data.get("regime_note", ""),
             "block_bull_puts":      data.get("block_bull_puts", False),
             "vix_shock_reason":     data.get("vix_shock_reason"),
         }
     except FileNotFoundError:
         print("   ⚠️  macro_regime.json not found — using neutral defaults")
-        return _NEUTRAL
+        return _neutral_regime()
 
 
 def load_technicals():
@@ -198,8 +214,28 @@ def rank_spreads():
         spread["kronos_direction"]  = kronos_ticker.get("direction", "n/a")
         spread["kronos_forecast_pct"] = kronos_ticker.get("forecast_pct", 0.0)
 
+        # ── Kronos hard block ──────────────────────────────────────────────────
+        # If Kronos strongly forecasts a move that OPPOSES the spread direction,
+        # force SKIP regardless of PoP/ROI. A 0.80× multiplier is not enough
+        # when the forecast is 5%+ against the trade (e.g. -10.77% on a Bull Put).
+        # Bull Put needs stock to stay UP  → bearish forecast ≥5% = hard block
+        # Bear Call needs stock to stay DN → bullish forecast ≥5% = hard block
+        kronos_dir = kronos_ticker.get("direction", "neutral")
+        kronos_fc  = kronos_ticker.get("forecast_pct", 0.0)
+        kronos_blocked = False
+        if spread_type == "Bull Put" and kronos_dir == "bearish" and abs(kronos_fc) >= 5.0:
+            spread["decision"]    = "SKIP"
+            spread["skip_reason"] = f"Kronos {kronos_fc:+.1f}% bearish — opposes Bull Put"
+            kronos_blocked = True
+        elif spread_type == "Bear Call" and kronos_dir == "bullish" and abs(kronos_fc) >= 5.0:
+            spread["decision"]    = "SKIP"
+            spread["skip_reason"] = f"Kronos {kronos_fc:+.1f}% bullish — opposes Bear Call"
+            kronos_blocked = True
+
         # Regime-adjusted ENTER / WATCH / SKIP thresholds
-        if regime.get("block_bull_puts") and spread_type == "Bull Put":
+        if kronos_blocked:
+            pass  # decision already set above
+        elif regime.get("block_bull_puts") and spread_type == "Bull Put":
             spread["decision"] = "SKIP"
             spread["skip_reason"] = "VIX shock — Bull Put entries blocked"
         elif spread["pop"] >= regime["enter_pop"] and spread["roi"] >= regime["enter_roi"]:

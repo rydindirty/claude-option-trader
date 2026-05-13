@@ -2,8 +2,8 @@
 Step 12: Position Monitor
 Runs every 5 minutes during market hours. Checks all open
 positions against four exit rules:
-  1. Profit target  — close when spread value drops to 60% of
-                      credit received (40% profit locked in)
+  1. Profit target  — close when spread value drops to 50% of
+                      credit received (50% profit locked in)
   2. Stop loss      — close when spread costs 1.5x the credit to close
   3. Width hard cap — close if spread value exceeds 80% of max width
                       (gap-through protection regardless of other rules)
@@ -24,6 +24,9 @@ from zoneinfo import ZoneInfo
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import TRADIER_TOKEN, TRADIER_ENV, get_tradier_session, TRADIER_BASE_URL, TRADIER_HEADERS, TRADIER_ACCOUNT_ID
 import db
+
+# ── Paper trading mode ─────────────────────────────────────────
+PAPER_TRADING = os.getenv("PAPER_TRADING", "0").strip().lower() in ("1", "true", "yes")
 
 # ── Twilio SMS ─────────────────────────────────────────────────
 _TWILIO_SID  = os.getenv("TWILIO_SID", "")
@@ -151,6 +154,7 @@ def place_closing_order(position, current_value=None):
     """
     Place a closing multileg order to exit the spread.
     Uses the actual live spread value as the limit price.
+    In PAPER_TRADING mode, skips the Tradier API and returns a mock response.
     Raises ValueError if no current value is available.
     """
     contracts = position["contracts"]
@@ -161,6 +165,11 @@ def place_closing_order(position, current_value=None):
         raise ValueError(
             f"Cannot place closing order for {ticker} without a valid market price"
         )
+
+    # Paper trading — log the close but don't touch Tradier
+    if PAPER_TRADING:
+        print(f"  📄 [PAPER] Would close {ticker} at ${current_value:.2f}")
+        return {"order": {"id": f"PAPER-CLOSE-{ticker}-{int(time.time())}", "status": "filled"}}
 
     limit_price = round(current_value, 2)
 
@@ -487,7 +496,7 @@ def run_monitor(interval_minutes=1):
           f"{MARKET_CLOSE_HOUR}:{MARKET_CLOSE_MIN:02d} ET")
     print(f"   Open positions in DB: {len(open_positions)}")
     print(f"   Exit rules:")
-    print(f"     Profit target: 40% of max credit")
+    print(f"     Profit target: 50% of max credit")
     print(f"     Stop loss:     {STOP_LOSS_MULT}x credit received")
     print(f"     Width cap:     {int(MAX_WIDTH_PCT*100)}% of spread width (gap protection)")
     print(f"     Time stop:     hard close at DTE < 21")

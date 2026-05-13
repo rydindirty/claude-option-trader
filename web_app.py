@@ -26,11 +26,12 @@ from config import (TRADIER_TOKEN, TRADIER_ENV, get_tradier_session,
                     TRADIER_BASE_URL, TRADIER_HEADERS, TRADIER_ACCOUNT_ID,
                     WEB_USERNAME, WEB_PASSWORD, SESSION_SECRET)
 
-ALERT_EMAIL = os.getenv("ALERT_EMAIL", "")
-SMTP_HOST   = os.getenv("SMTP_HOST", "")
-SMTP_PORT   = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER   = os.getenv("SMTP_USER", "")
-SMTP_PASS   = os.getenv("SMTP_PASS", "")
+ALERT_EMAIL   = os.getenv("ALERT_EMAIL", "")
+SMTP_HOST     = os.getenv("SMTP_HOST", "")
+SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER     = os.getenv("SMTP_USER", "")
+SMTP_PASS     = os.getenv("SMTP_PASS", "")
+PAPER_TRADING = os.getenv("PAPER_TRADING", "0").strip().lower() in ("1", "true", "yes")
 
 _TWILIO_SID   = os.getenv("TWILIO_SID", "")
 _TWILIO_TOKEN = os.getenv("TWILIO_TOKEN", "")
@@ -431,7 +432,7 @@ def save_placed_trade(trade, contracts, order_response, status: str = "pending")
         "long_symbol": build_option_symbol(ticker, expiration, opt_type, long_strike),
         "tradier_order_id": order_response.get("order", {}).get("id", "unknown"),
         "opened_at": datetime.now().isoformat(),
-        "profit_target_pct": 0.40,
+        "profit_target_pct": 0.50,
         "stop_loss_pct": 1.50,
         "regime": _read_regime(),
     }, status=status)
@@ -604,6 +605,16 @@ async def api_approve(request: Request, ticker: str, req: ApproveRequest):
     trade = next((t for t in trades if t["ticker"].upper() == ticker.upper()), None)
     if not trade:
         raise HTTPException(404, f"No trade found for {ticker}")
+
+    # ── Paper trading mode — log trade to DB, skip all Tradier API calls ──
+    if PAPER_TRADING:
+        mock_response = {"order": {"id": f"PAPER-{ticker}-{int(datetime.now().timestamp())}", "status": "filled"}}
+        row_id = save_placed_trade(trade, req.contracts, mock_response, status="open")
+        note = "[PAPER TRADE]" + (f" {req.notes.strip()}" if req.notes.strip() else "")
+        db.save_trade_notes(row_id, note)
+        return {"success": True, "order_id": mock_response["order"]["id"],
+                "status": "paper_filled", "db_row": row_id,
+                "preview": {"status": "paper", "commission": 0}}
 
     preview_info = None
     try:
@@ -1339,6 +1350,7 @@ def _page(active_tab: str, page_content: str) -> str:
     portfolio_cls = "active" if active_tab == "portfolio" else ""
     approval_cls  = "active" if active_tab == "approval"  else ""
     positions_cls = "active" if active_tab == "positions" else ""
+    strategy_cls  = "active" if active_tab == "strategy"  else ""
     show_acct_bar = active_tab != "portfolio"
     acct_bar = """
 <div class="acct-bar">
@@ -1360,13 +1372,15 @@ def _page(active_tab: str, page_content: str) -> str:
 </head>
 <body>
 <nav>
-  <div class="logo">Dick<span>Trades</span></div>
+  <div class="logo">Dick<span>Trades</span>{"&nbsp;<span style='background:#f59e0b;color:#000;font-size:0.65rem;font-weight:700;padding:2px 7px;border-radius:4px;vertical-align:middle;letter-spacing:0.05em'>PAPER</span>" if PAPER_TRADING else ""}</div>
   <div class="tabs">
     <a href="/portfolio" class="tab {portfolio_cls}">Portfolio</a>
     <a href="/approval"  class="tab {approval_cls}">Approval</a>
     <a href="/positions" class="tab {positions_cls}">Positions</a>
+    <a href="/strategy"  class="tab {strategy_cls}">Strategy</a>
   </div>
 </nav>
+{"<div style='background:#f59e0b;color:#000;text-align:center;font-size:0.8rem;font-weight:700;padding:6px;letter-spacing:0.05em'>📄 PAPER TRADING MODE — No real orders are being placed</div>" if PAPER_TRADING else ""}
 {acct_bar}
 <div class="content content-{active_tab}">{html_part}</div>
 <div id="toast"></div>
@@ -2160,6 +2174,326 @@ setInterval(() => loadPositions(false), 60000);
 """
 
 
+@app.get("/api/strategy/review")
+async def api_strategy_review(request: Request):
+    """Return pending review + current params + review history."""
+    _require_auth(request)
+    pending_path = _data("strategy_review_pending.json")
+    params_path  = _data("strategy_params.json")
+    log_path     = _data("strategy_review_log.json")
+
+    pending, params, history = None, {}, []
+    try:
+        with open(pending_path) as f:
+            pending = json.load(f)
+    except FileNotFoundError:
+        pass
+    try:
+        with open(params_path) as f:
+            p = json.load(f)
+        p.pop("_note", None)
+        params = p
+    except FileNotFoundError:
+        pass
+    try:
+        with open(log_path) as f:
+            history = json.load(f)
+    except FileNotFoundError:
+        pass
+
+    return {"pending": pending, "params": params, "history": list(reversed(history[-20:]))}
+
+
+@app.post("/api/strategy/approve")
+async def api_strategy_approve(request: Request):
+    """Apply the pending review's proposed parameter changes."""
+    _require_auth(request)
+    pending_path = _data("strategy_review_pending.json")
+    params_path  = _data("strategy_params.json")
+    log_path     = _data("strategy_review_log.json")
+
+    try:
+        with open(pending_path) as f:
+            pending = json.load(f)
+    except FileNotFoundError:
+        raise HTTPException(404, "No pending review found")
+
+    if pending.get("status") != "pending":
+        raise HTTPException(400, "Review already actioned")
+
+    # Load current params and apply proposed changes
+    try:
+        with open(params_path) as f:
+            params = json.load(f)
+    except FileNotFoundError:
+        params = {}
+
+    applied = {}
+    for param, change in pending.get("proposed", {}).items():
+        new_val = change.get("after")
+        if new_val is not None:
+            params[param] = new_val
+            applied[param] = {"before": change.get("before"), "after": new_val}
+
+    params["_note"] = "Live strategy parameters. Edited by the Strategy Review tab — do NOT hand-edit. Commit these values to the pipeline defaults before returning to live trading."
+    with open(params_path, "w") as f:
+        json.dump(params, f, indent=2)
+
+    # Mark pending as approved
+    pending["status"] = "approved"
+    pending["approved_at"] = datetime.now().isoformat()
+    with open(pending_path, "w") as f:
+        json.dump(pending, f, indent=2)
+
+    # Append to log
+    log = []
+    try:
+        with open(log_path) as f:
+            log = json.load(f)
+    except FileNotFoundError:
+        pass
+    if log:
+        log[-1]["status"] = "approved"
+        log[-1]["approved_at"] = pending["approved_at"]
+        log[-1]["applied"] = applied
+    with open(log_path, "w") as f:
+        json.dump(log, f, indent=2)
+
+    return {"success": True, "applied": applied}
+
+
+@app.post("/api/strategy/reject")
+async def api_strategy_reject(request: Request):
+    """Dismiss the pending review without applying changes."""
+    _require_auth(request)
+    pending_path = _data("strategy_review_pending.json")
+    log_path     = _data("strategy_review_log.json")
+
+    try:
+        with open(pending_path) as f:
+            pending = json.load(f)
+    except FileNotFoundError:
+        raise HTTPException(404, "No pending review found")
+
+    if pending.get("status") != "pending":
+        raise HTTPException(400, "Review already actioned")
+
+    pending["status"] = "rejected"
+    pending["rejected_at"] = datetime.now().isoformat()
+    with open(pending_path, "w") as f:
+        json.dump(pending, f, indent=2)
+
+    log = []
+    try:
+        with open(log_path) as f:
+            log = json.load(f)
+    except FileNotFoundError:
+        pass
+    if log:
+        log[-1]["status"] = "rejected"
+        log[-1]["rejected_at"] = pending["rejected_at"]
+    with open(log_path, "w") as f:
+        json.dump(log, f, indent=2)
+
+    return {"success": True}
+
+
+_STRATEGY_CONTENT = """
+<div class="section-header">
+  <h2>Strategy</h2>
+  <p class="sub">Live parameters · Pending reviews · Review history</p>
+</div>
+
+<div id="strat-loading" style="color:var(--muted);padding:2rem 0">Loading...</div>
+<div id="strat-body" style="display:none">
+
+  <!-- Current params -->
+  <div class="card" style="margin-bottom:1.5rem">
+    <h3 style="margin:0 0 1rem">Current Parameters</h3>
+    <div id="params-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:0.75rem"></div>
+    <p style="margin:0.75rem 0 0;font-size:0.72rem;color:var(--muted)">
+      Changes take effect on the next pipeline run. Commit to repo before returning to live trading.
+    </p>
+  </div>
+
+  <!-- Pending review -->
+  <div id="pending-card" style="display:none;margin-bottom:1.5rem">
+    <div class="card" style="border:1px solid var(--amber,#f59e0b)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+        <h3 style="margin:0">⏳ Pending Strategy Review</h3>
+        <span id="pending-meta" style="font-size:0.75rem;color:var(--muted)"></span>
+      </div>
+      <p id="pending-rationale" style="margin:0 0 1rem;line-height:1.5"></p>
+      <div style="margin-bottom:1rem">
+        <h4 style="margin:0 0 0.5rem;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted)">Performance snapshot</h4>
+        <div id="pending-stats" style="display:flex;gap:2rem;flex-wrap:wrap"></div>
+      </div>
+      <div style="margin-bottom:1.5rem">
+        <h4 style="margin:0 0 0.5rem;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted)">Proposed Changes</h4>
+        <table class="history-table" id="changes-table">
+          <thead><tr><th>Parameter</th><th>Current</th><th>Proposed</th></tr></thead>
+          <tbody id="changes-tbody"></tbody>
+        </table>
+      </div>
+      <div style="display:flex;gap:0.75rem">
+        <button class="btn btn-approve" onclick="approveReview()">Approve Changes</button>
+        <button class="btn btn-skip" onclick="rejectReview()">Reject</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Review history -->
+  <div class="card">
+    <h3 style="margin:0 0 1rem">Review History</h3>
+    <div id="history-empty" style="color:var(--muted);display:none">No reviews yet.</div>
+    <table class="history-table" id="history-table" style="display:none">
+      <thead>
+        <tr>
+          <th>Date</th><th>Trades</th><th>Win %</th><th>P&amp;L</th><th>Changes</th><th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="history-tbody"></tbody>
+    </table>
+  </div>
+
+</div>
+
+<!-- JS -->
+<script>
+const PARAM_LABELS = {
+  min_delta: "Min Delta", max_delta: "Max Delta", min_credit: "Min Credit ($)",
+  enter_pop: "Enter PoP (%)", enter_roi: "Enter ROI (%)",
+  watch_pop: "Watch PoP (%)", watch_roi: "Watch ROI (%)"
+};
+
+async function loadStrategy() {
+  try {
+    const d = await fetch('/api/strategy/review').then(r => r.json());
+    document.getElementById('strat-loading').style.display = 'none';
+    document.getElementById('strat-body').style.display    = 'block';
+
+    // Current params
+    const grid = document.getElementById('params-grid');
+    grid.innerHTML = '';
+    for (const [k, v] of Object.entries(d.params || {})) {
+      const lbl = PARAM_LABELS[k] || k;
+      grid.innerHTML += `<div style="background:var(--surface2,#1e1e2e);padding:0.75rem;border-radius:6px">
+        <div style="font-size:0.7rem;color:var(--muted);margin-bottom:0.25rem">${lbl}</div>
+        <div style="font-size:1.1rem;font-weight:600">${v}</div>
+      </div>`;
+    }
+
+    // Pending review
+    const p = d.pending;
+    if (p && p.status === 'pending') {
+      document.getElementById('pending-card').style.display = 'block';
+      document.getElementById('pending-rationale').textContent = p.rationale || '';
+      document.getElementById('pending-meta').textContent =
+        `${p.trades_analyzed} trades · ${p.win_rate_pct}% win rate · P&L $${(p.total_pnl >= 0 ? '+' : '') + p.total_pnl.toFixed(2)}`;
+
+      // Stats row
+      const statsEl = document.getElementById('pending-stats');
+      const reasons = Object.entries(p.close_reasons || {})
+        .sort((a,b) => b[1]-a[1]).slice(0,3)
+        .map(([k,v]) => `${k}: ${v}`).join(' · ');
+      statsEl.innerHTML = `<span style="color:var(--muted);font-size:0.8rem">${reasons}</span>`;
+
+      // Changes table
+      const tbody = document.getElementById('changes-tbody');
+      tbody.innerHTML = '';
+      for (const [param, change] of Object.entries(p.proposed || {})) {
+        const lbl = PARAM_LABELS[param] || param;
+        const dir = change.after > change.before ? '▲' : '▼';
+        const color = change.after > change.before ? 'var(--green)' : '#f87171';
+        tbody.innerHTML += `<tr>
+          <td>${lbl}</td>
+          <td>${change.before}</td>
+          <td style="color:${color};font-weight:600">${dir} ${change.after}</td>
+        </tr>`;
+      }
+    }
+
+    // History
+    if (d.history && d.history.length > 0) {
+      document.getElementById('history-empty').style.display = 'none';
+      document.getElementById('history-table').style.display = 'table';
+      const tbody = document.getElementById('history-tbody');
+      tbody.innerHTML = '';
+      for (const h of d.history) {
+        const dt  = h.timestamp ? new Date(h.timestamp).toLocaleDateString() : '—';
+        const pnl = h.total_pnl != null ? `$${h.total_pnl >= 0 ? '+' : ''}${h.total_pnl.toFixed(2)}` : '—';
+        const wr  = h.win_rate_pct != null ? `${h.win_rate_pct}%` : '—';
+        const nchanges = h.suggested ? Object.values(h.suggested).filter(v => v !== null).length : 0;
+        const statusColor = {approved:'var(--green)', rejected:'#f87171', pending:'#f59e0b', no_changes:'var(--muted)'}[h.status] || 'var(--muted)';
+        tbody.innerHTML += `<tr>
+          <td>${dt}</td>
+          <td>${h.trades_analyzed || '—'}</td>
+          <td>${wr}</td>
+          <td>${pnl}</td>
+          <td>${nchanges > 0 ? nchanges + ' param' + (nchanges > 1 ? 's' : '') : 'none'}</td>
+          <td style="color:${statusColor};font-weight:600">${h.status || '—'}</td>
+        </tr>`;
+      }
+    } else {
+      document.getElementById('history-empty').style.display = 'block';
+    }
+  } catch(e) {
+    document.getElementById('strat-loading').textContent = 'Failed to load strategy data.';
+  }
+}
+
+async function approveReview() {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = 'Applying...';
+  try {
+    const r = await fetch('/api/strategy/approve', {method:'POST'});
+    const d = await r.json();
+    if (d.success) {
+      showToast('Strategy parameters updated — takes effect next pipeline run');
+      await loadStrategy();
+    } else {
+      showToast('Error: ' + (d.detail || 'unknown'), true);
+      btn.disabled = false; btn.textContent = 'Approve Changes';
+    }
+  } catch(e) {
+    showToast('Request failed', true);
+    btn.disabled = false; btn.textContent = 'Approve Changes';
+  }
+}
+
+async function rejectReview() {
+  const btn = event.target;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/strategy/reject', {method:'POST'});
+    const d = await r.json();
+    if (d.success) {
+      showToast('Review rejected — no changes applied');
+      await loadStrategy();
+    } else {
+      showToast('Error: ' + (d.detail || 'unknown'), true);
+      btn.disabled = false;
+    }
+  } catch(e) {
+    showToast('Request failed', true);
+    btn.disabled = false;
+  }
+}
+
+function showToast(msg, err=false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.background = err ? '#dc2626' : 'var(--green)';
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 4000);
+}
+
+loadStrategy();
+</script>
+"""
+
+
 @app.get("/portfolio", response_class=HTMLResponse)
 async def portfolio_page(request: Request):
     if not _is_authenticated(request):
@@ -2179,6 +2513,13 @@ async def positions_page(request: Request):
     if not _is_authenticated(request):
         return RedirectResponse("/login")
     return HTMLResponse(_page("positions", _POSITIONS_CONTENT))
+
+
+@app.get("/strategy", response_class=HTMLResponse)
+async def strategy_page(request: Request):
+    if not _is_authenticated(request):
+        return RedirectResponse("/login")
+    return HTMLResponse(_page("strategy", _STRATEGY_CONTENT))
 
 
 if __name__ == "__main__":
