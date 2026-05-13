@@ -317,8 +317,8 @@ def main():
         _log("=" * 60)
         return
 
-    if bal["available"] < 200:
-        _log(f"Available capital ${bal['available']:.2f} below $200 floor — skipping today")
+    if bal["available"] < 100:
+        _log(f"Available capital ${bal['available']:.2f} below $100 floor — skipping today")
         _log("=" * 60)
         return
 
@@ -385,7 +385,7 @@ def main():
 
         # Recheck balance after each placement to stay within limits
         bal = _paper_balance()
-        if bal["open_count"] >= MAX_OPEN_TRADES or bal["available"] < 200:
+        if bal["open_count"] >= MAX_OPEN_TRADES or bal["available"] < 100:
             break
 
     _log(f"Done — {placed} paper trade(s) placed today")
