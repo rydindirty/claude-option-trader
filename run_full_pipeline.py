@@ -112,12 +112,6 @@ def main():
             auto_trader = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_auto_trader.py")
             subprocess.run([sys.executable, auto_trader])
 
-            # Run strategy review if enough trades have closed
-            print("\n" + "="*80)
-            print("▶ STRATEGY REVIEW — checking for optimization opportunities")
-            print("="*80)
-            strategy_review = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_strategy_review.py")
-            subprocess.run([sys.executable, strategy_review])
 
 if __name__ == "__main__":
     main()

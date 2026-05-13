@@ -17,6 +17,7 @@ import os
 import sys
 import time
 import traceback
+import subprocess
 import requests
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
@@ -213,7 +214,14 @@ def log_closed_trade(position, close_reason, close_value, order_response):
         close_order_id      = order_response.get("order", {}).get("id", "unknown"),
     )
 
+    _trigger_strategy_review()
+
     return profit
+
+
+def _trigger_strategy_review():
+    review_script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "paper_strategy_review.py")
+    subprocess.Popen([sys.executable, review_script])
 
 
 def check_positions():
