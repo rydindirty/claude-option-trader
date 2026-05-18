@@ -1,12 +1,13 @@
 """
 Step 12: Position Monitor
-Runs every 5 minutes during market hours. Checks all open
+Runs every minute during market hours. Checks all open
 positions against four exit rules:
   1. Profit target  — close when spread value drops to 50% of
                       credit received (50% profit locked in)
-  2. Stop loss      — close when spread costs 1.5x the credit to close
+  2. Delta stop     — close when short leg delta ≥ 0.50 (strike absorbed;
+                      beyond this point gamma risk accelerates losses)
   3. Width hard cap — close if spread value exceeds 80% of max width
-                      (gap-through protection regardless of other rules)
+                      (hard max-loss backstop regardless of other rules)
   4. Time stop      — hard close when DTE < 21 (past deadline)
                       on DTE = 21: hold through the day; after 3:30 PM ET
                       close only if spread is unfavorable (above credit)
@@ -148,6 +149,33 @@ def get_spread_value(short_symbol, long_symbol):
 
     except Exception as e:
         print(f"   ⚠️  Quote error: {e}")
+        return None
+
+
+def get_short_delta(short_symbol: str) -> float | None:
+    """
+    Fetch current delta for the short leg via Tradier greeks.
+    Returns the raw signed delta (negative for puts, positive for calls),
+    or None if the data is unavailable.
+    """
+    try:
+        r = _session.get(
+            f"{TRADIER_BASE_URL}/markets/quotes",
+            headers={"Authorization": f"Bearer {TRADIER_TOKEN}",
+                     "Accept": "application/json"},
+            params={"symbols": short_symbol, "greeks": "true"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        quote = data.get("quotes", {}).get("quote", {})
+        if isinstance(quote, list):
+            quote = quote[0] if quote else {}
+        greeks = quote.get("greeks") or {}
+        delta = greeks.get("delta")
+        return float(delta) if delta is not None else None
+    except Exception as e:
+        print(f"   ⚠️  Delta fetch error for {short_symbol}: {e}")
         return None
 
 
@@ -385,24 +413,33 @@ def check_positions():
                 remaining.append(pos)
             continue
 
-        # ── Rule 2: Stop loss (1.5x credit) ────────────────────
-        stop = credit * STOP_LOSS_MULT
-        if current_value >= stop:
-            print(f"  🛑 STOP LOSS triggered — "
-                  f"spread at ${current_value:.2f} vs "
-                  f"stop ${stop:.2f}")
-            try:
-                response = place_closing_order(pos, current_value)
-                profit   = log_closed_trade(
-                    pos, "stop_loss", current_value, response)
-                print(f"  ✅ Closed at ${current_value:.2f} | "
-                      f"P&L: ${profit:.2f}")
-                send_sms(f"DickTrades CLOSED {ticker} | Stop Loss | "
-                         f"${current_value:.2f} | P&L: ${profit:+.2f}")
-            except Exception as e:
-                print(f"  ❌ Close failed: {e}")
-                remaining.append(pos)
-            continue
+        # ── Rule 2: Delta stop (short strike absorbed) ────────────
+        # Close when abs(short delta) ≥ 0.50 — the strike has become ATM
+        # or worse. Beyond this point gamma accelerates rapidly and the
+        # spread is unlikely to recover. Width cap below handles gaps.
+        short_delta = get_short_delta(pos["short_symbol"])
+        if short_delta is not None:
+            if abs(short_delta) >= DELTA_STOP:
+                print(f"  🛑 DELTA STOP triggered — "
+                      f"short delta {short_delta:+.3f} "
+                      f"(abs ≥ {DELTA_STOP})")
+                try:
+                    response = place_closing_order(pos, current_value)
+                    profit   = log_closed_trade(
+                        pos, "delta_stop", current_value, response)
+                    print(f"  ✅ Closed at ${current_value:.2f} | "
+                          f"P&L: ${profit:.2f}")
+                    send_sms(f"DickTrades CLOSED {ticker} | Delta Stop | "
+                             f"${current_value:.2f} | P&L: ${profit:+.2f}")
+                except Exception as e:
+                    print(f"  ❌ Close failed: {e}")
+                    remaining.append(pos)
+                continue
+            else:
+                print(f"  ℹ️  Short delta: {short_delta:+.3f} "
+                      f"(delta stop at ±{DELTA_STOP})")
+        else:
+            print(f"  ℹ️  Delta unavailable — relying on width cap")
 
         # ── Rule 3b: Spread-width hard cap (gap-through protection) ──
         spread_width = abs(pos["short_strike"] - pos["long_strike"])
@@ -427,7 +464,7 @@ def check_positions():
 
         # ── No trigger — keep position open ───────────────────
         print(f"  ✓  Holding — profit target at "
-              f"${target:.2f} | stop at ${stop:.2f} | "
+              f"${target:.2f} | delta stop at ±{DELTA_STOP} | "
               f"width cap at ${width_cap:.2f}")
         remaining.append(pos)
 
@@ -439,8 +476,8 @@ def check_positions():
 
 
 # ── Exit rule constants ────────────────────────────────────────────────────────
-STOP_LOSS_MULT  = 1.5   # close when spread costs 1.5x the credit to close
-MAX_WIDTH_PCT   = 0.80  # hard cap: close if spread value > 80% of max width
+DELTA_STOP    = 0.50   # close when abs(short delta) ≥ this (strike absorbed)
+MAX_WIDTH_PCT = 0.80   # hard cap: close if spread value > 80% of max width
 
 # ── In-memory state for fluid stops (reset each monitor session) ──────────────
 # Trailing profit: tracks peak profit % seen so far per trade id
@@ -505,8 +542,8 @@ def run_monitor(interval_minutes=1):
     print(f"   Open positions in DB: {len(open_positions)}")
     print(f"   Exit rules:")
     print(f"     Profit target: 50% of max credit")
-    print(f"     Stop loss:     {STOP_LOSS_MULT}x credit received")
-    print(f"     Width cap:     {int(MAX_WIDTH_PCT*100)}% of spread width (gap protection)")
+    print(f"     Delta stop:    abs(short delta) ≥ {DELTA_STOP} (strike absorbed)")
+    print(f"     Width cap:     {int(MAX_WIDTH_PCT*100)}% of spread width (hard backstop)")
     print(f"     Time stop:     hard close at DTE < 21")
     print(f"                    DTE = 21: EOD check after 3:30 PM")
     print("=" * 60)

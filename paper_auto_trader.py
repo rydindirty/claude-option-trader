@@ -224,6 +224,30 @@ def _already_open(ticker: str) -> bool:
     return len(rows) > 0
 
 
+def _open_position_sectors(report_trades: list) -> set:
+    """
+    Return the set of sector ETF labels (e.g. 'XLK', 'XLU') that are
+    already occupied by at least one active auto-paper position.
+    Uses today's report_table as the sector lookup; tickers not in
+    the report fall back to 'Unknown' and don't block anything.
+    """
+    sector_lookup = {t["ticker"]: t.get("sector", "Unknown") for t in report_trades}
+    _db.init_db()
+    conn = sqlite3.connect(_db.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT ticker FROM trades WHERE status IN ('open','pending','closing') "
+        "AND tradier_order_id LIKE 'PAPER-AUTO-%'"
+    ).fetchall()
+    conn.close()
+    sectors: set = set()
+    for row in rows:
+        s = sector_lookup.get(row["ticker"], "Unknown")
+        if s and s != "Unknown":
+            sectors.add(s)
+    return sectors
+
+
 def _place_paper_trade(trade: dict, contracts: int, reason: str) -> int:
     """Insert a paper auto trade into the DB and return the row id."""
     short_strike, long_strike = _parse_strikes(trade["legs"])
@@ -328,6 +352,10 @@ def main():
     # Sort by pipeline score (descending) — best risk-adjusted PoP×ROI×multipliers first
     sorted_trades = sorted(trades, key=lambda x: float(x.get("score", 0)), reverse=True)
 
+    # Sectors already occupied by open positions — block one trade per sector
+    blocked_sectors = _open_position_sectors(trades)
+    _log(f"Blocked sectors (open positions): {blocked_sectors or 'none'}")
+
     candidates = []
     for t in sorted_trades:
         ticker = t["ticker"]
@@ -336,6 +364,7 @@ def main():
         heat_score = heat.get(ticker, 0)
         max_loss_per_contract = float(t["max_loss"].replace("$", ""))
         risk_limit = bal["available"] * MAX_RISK_PCT
+        trade_sector = t.get("sector", "Unknown")
 
         reason = None
         if quant != "ENTER":
@@ -351,6 +380,8 @@ def main():
             )
         elif _already_open(ticker):
             reason = "already have open position in this ticker"
+        elif trade_sector != "Unknown" and trade_sector in blocked_sectors:
+            reason = f"sector {trade_sector} already occupied by open position"
 
         if reason:
             _log(f"  SKIP {ticker}: {reason}")
@@ -379,9 +410,15 @@ def main():
         row_id = _place_paper_trade(trade, contracts=1, reason=reason)
         _log(
             f"  ENTER {ticker} {trade['type']} {trade['legs']} "
-            f"x1 credit={trade['net_credit']} max_loss=${max_loss:.2f} | DB#{row_id}"
+            f"x1 credit={trade['net_credit']} max_loss=${max_loss:.2f} "
+            f"sector={trade.get('sector', '?')} | DB#{row_id}"
         )
         placed += 1
+
+        # Block this sector for any further placements this run
+        sector = trade.get("sector", "Unknown")
+        if sector != "Unknown":
+            blocked_sectors.add(sector)
 
         # Recheck balance after each placement to stay within limits
         bal = _paper_balance()
