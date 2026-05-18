@@ -50,7 +50,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PARAMS_FILE  = os.path.join(_PROJECT_ROOT, "data", "strategy_params.json")
 
 def _load_strategy_params() -> dict:
-    defaults = {"enter_pop": 72, "enter_roi": 8, "watch_pop": 72, "watch_roi": 5}
+    defaults = {"enter_pop": 74, "enter_roi": 8, "watch_pop": 72, "watch_roi": 5}
     try:
         with open(_PARAMS_FILE) as f:
             p = json.load(f)
