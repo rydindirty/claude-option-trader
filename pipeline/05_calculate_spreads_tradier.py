@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PARAMS_FILE = os.path.join(_PROJECT_ROOT, "data", "strategy_params.json")
-_PARAM_DEFAULTS = {"min_delta": 0.12, "max_delta": 0.22, "min_credit": 1.00}
+_PARAM_DEFAULTS = {"min_delta": 0.10, "max_delta": 0.20, "min_credit": 1.20}
 
 def _load_params() -> dict:
     try:

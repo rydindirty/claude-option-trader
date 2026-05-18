@@ -1,8 +1,8 @@
 {
-  "min_delta": 0.12,
-  "max_delta": 0.22,
-  "min_credit": 1.00,
-  "enter_pop": 72,
+  "min_delta": 0.1,
+  "max_delta": 0.2,
+  "min_credit": 1.2,
+  "enter_pop": 74,
   "enter_roi": 8,
   "watch_pop": 72,
   "watch_roi": 5,

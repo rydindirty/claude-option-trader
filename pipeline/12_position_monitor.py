@@ -4,7 +4,9 @@ Runs every 5 minutes during market hours. Checks all open
 positions against four exit rules:
   1. Profit target  — close when spread value drops to 50% of
                       credit received (50% profit locked in)
-  2. Stop loss      — close when spread costs 1.5x the credit to close
+  2. Delta stop     — close when |short-leg delta| ≥ 0.50
+                      (short strike now ITM/near-ITM; replaces old 1.5x credit stop
+                      based on backtest evidence — see data/backtest_results.json)
   3. Width hard cap — close if spread value exceeds 80% of max width
                       (gap-through protection regardless of other rules)
   4. Time stop      — hard close when DTE < 21 (past deadline)
@@ -148,6 +150,38 @@ def get_spread_value(short_symbol, long_symbol):
 
     except Exception as e:
         print(f"   ⚠️  Quote error: {e}")
+        return None
+
+
+def get_short_delta(ticker: str, expiration: str, short_strike: float,
+                    spread_type: str) -> float | None:
+    """
+    Fetch live delta for the short leg via Tradier options chain (greeks=true).
+    spread_type is "Bull Put" (short put) or "Bear Call" (short call).
+    Returns signed delta (puts negative, calls positive), or None if unavailable.
+    """
+    option_type = "put" if "Put" in spread_type else "call"
+    try:
+        r = _session.get(
+            f"{TRADIER_BASE_URL}/markets/options/chains",
+            headers={"Authorization": f"Bearer {TRADIER_TOKEN}",
+                     "Accept": "application/json"},
+            params={"symbol": ticker, "expiration": expiration, "greeks": "true"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        options = r.json().get("options", {}).get("option", []) or []
+        if isinstance(options, dict):
+            options = [options]
+        for o in options:
+            if (o.get("option_type") == option_type
+                    and abs(float(o.get("strike", 0)) - short_strike) < 1e-6):
+                greeks = o.get("greeks") or {}
+                d = greeks.get("delta")
+                return float(d) if d is not None else None
+        return None
+    except Exception as e:
+        print(f"   ⚠️  Delta fetch failed ({ticker} {short_strike} {option_type}): {e}")
         return None
 
 
@@ -385,19 +419,24 @@ def check_positions():
                 remaining.append(pos)
             continue
 
-        # ── Rule 2: Stop loss (1.5x credit) ────────────────────
-        stop = credit * STOP_LOSS_MULT
-        if current_value >= stop:
-            print(f"  🛑 STOP LOSS triggered — "
-                  f"spread at ${current_value:.2f} vs "
-                  f"stop ${stop:.2f}")
+        # ── Rule 2: Delta stop (|short delta| ≥ 0.50) ─────────
+        short_delta = get_short_delta(
+            pos["ticker"], pos["expiration"],
+            pos["short_strike"], pos["type"],
+        )
+        if short_delta is not None and abs(short_delta) >= DELTA_STOP_THRESHOLD:
+            print(f"  🛑 DELTA STOP triggered — "
+                  f"|short delta| {abs(short_delta):.2f} ≥ "
+                  f"{DELTA_STOP_THRESHOLD:.2f} "
+                  f"(spread cost ${current_value:.2f})")
             try:
                 response = place_closing_order(pos, current_value)
                 profit   = log_closed_trade(
-                    pos, "stop_loss", current_value, response)
+                    pos, "delta_stop", current_value, response)
                 print(f"  ✅ Closed at ${current_value:.2f} | "
                       f"P&L: ${profit:.2f}")
-                send_sms(f"DickTrades CLOSED {ticker} | Stop Loss | "
+                send_sms(f"DickTrades CLOSED {ticker} | Delta Stop "
+                         f"|Δ|={abs(short_delta):.2f} | "
                          f"${current_value:.2f} | P&L: ${profit:+.2f}")
             except Exception as e:
                 print(f"  ❌ Close failed: {e}")
@@ -426,8 +465,9 @@ def check_positions():
             continue
 
         # ── No trigger — keep position open ───────────────────
+        delta_str = f"|Δ|={abs(short_delta):.2f}" if short_delta is not None else "|Δ|=?"
         print(f"  ✓  Holding — profit target at "
-              f"${target:.2f} | stop at ${stop:.2f} | "
+              f"${target:.2f} | {delta_str} (stop ≥ {DELTA_STOP_THRESHOLD:.2f}) | "
               f"width cap at ${width_cap:.2f}")
         remaining.append(pos)
 
@@ -439,8 +479,8 @@ def check_positions():
 
 
 # ── Exit rule constants ────────────────────────────────────────────────────────
-STOP_LOSS_MULT  = 1.5   # close when spread costs 1.5x the credit to close
-MAX_WIDTH_PCT   = 0.80  # hard cap: close if spread value > 80% of max width
+DELTA_STOP_THRESHOLD = 0.50  # close when |short-leg delta| ≥ this (short strike threatened)
+MAX_WIDTH_PCT        = 0.80  # hard cap: close if spread value > 80% of max width
 
 # ── In-memory state for fluid stops (reset each monitor session) ──────────────
 # Trailing profit: tracks peak profit % seen so far per trade id
@@ -505,7 +545,7 @@ def run_monitor(interval_minutes=1):
     print(f"   Open positions in DB: {len(open_positions)}")
     print(f"   Exit rules:")
     print(f"     Profit target: 50% of max credit")
-    print(f"     Stop loss:     {STOP_LOSS_MULT}x credit received")
+    print(f"     Delta stop:    |short Δ| ≥ {DELTA_STOP_THRESHOLD:.2f}")
     print(f"     Width cap:     {int(MAX_WIDTH_PCT*100)}% of spread width (gap protection)")
     print(f"     Time stop:     hard close at DTE < 21")
     print(f"                    DTE = 21: EOD check after 3:30 PM")
