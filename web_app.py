@@ -788,6 +788,27 @@ async def api_close(request: Request, position_id: int):
     if current_value is None:
         raise HTTPException(503, "Could not fetch live price — try again")
 
+    # Paper trading — finalise the close directly in the DB; never touch Tradier.
+    # (close_position() always posts a real broker order, which the live account
+    # rejects for a paper position — that was the "refused to close" failure.)
+    if PAPER_TRADING:
+        credit    = pos["credit_received"]
+        contracts = pos["contracts"]
+        profit     = round((credit - current_value) * contracts * 100, 2)
+        profit_pct = round((credit - current_value) / credit * 100, 1) if credit else 0
+        db.close_trade(
+            trade_id=pos["id"],
+            close_reason="manual_close",
+            close_value=current_value,
+            profit_per_contract=round((credit - current_value) * 100, 2),
+            total_profit=profit,
+            profit_pct=profit_pct,
+            close_order_id=f"PAPER-CLOSE-{pos['ticker']}-{int(datetime.now().timestamp())}",
+        )
+        return {"success": True, "order_id": "paper", "close_value": current_value,
+                "total_profit": profit,
+                "message": f"Paper position closed at ${current_value:.2f} (P&L ${profit:+.2f})"}
+
     try:
         order_id = close_position(pos, current_value)
         return {"success": True, "order_id": order_id,
