@@ -50,10 +50,37 @@ import db as _db
 
 # ─── agent config ─────────────────────────────────────────────────────────────
 STARTING_BALANCE = 1000.00   # simulated account funded at launch
-MAX_RISK_PCT     = 0.25      # max fraction of available capital at risk per trade
-MAX_OPEN_TRADES  = 4         # max concurrent paper positions
 MAX_HEAT_SCORE   = 7         # skip trades with HEAT > this (too much catalyst risk)
 NOTE_PREFIX      = "[PAPER AUTO]"
+
+
+def _load_risk_params() -> dict:
+    """
+    Risk/sizing knobs, loaded from data/strategy_params.json (single source of truth,
+    same file the pipeline reads). Defaults are deliberately conservative.
+
+    NOTE on small accounts: one defined-risk equity spread risks ~100 × (width − credit)
+    dollars. A $1-wide / 1-3-width credit spread risks ~$67, which is ~13% of a $500
+    account — so a $500 account MUST set max_risk_pct ≈ 0.15 (and max_width ≈ 1) for any
+    trade to clear the gate. That is the honest floor for equity spreads; it is not a bug.
+    """
+    defaults = {
+        "max_risk_pct": 0.10,       # max fraction of available capital at risk per trade
+        "max_open_trades": 4,       # max concurrent paper positions
+        "max_same_direction": 2,    # max concurrent positions on the SAME side (anti-monoculture)
+    }
+    try:
+        with open(DATA_DIR / "strategy_params.json") as f:
+            p = json.load(f)
+        return {k: p.get(k, v) for k, v in defaults.items()}
+    except Exception:
+        return defaults
+
+
+_RISK = _load_risk_params()
+MAX_RISK_PCT       = _RISK["max_risk_pct"]
+MAX_OPEN_TRADES    = _RISK["max_open_trades"]
+MAX_SAME_DIRECTION = _RISK["max_same_direction"]
 
 
 # ─── logging ──────────────────────────────────────────────────────────────────
@@ -248,6 +275,27 @@ def _open_position_sectors(report_trades: list) -> set:
     return sectors
 
 
+def _open_position_directions() -> dict:
+    """
+    Count active auto-paper positions by spread direction. Used to cap same-side
+    exposure so the book can't become an all-Bull-Put (or all-Bear-Call) monoculture
+    that all blows up together on a single down/up day.
+    Returns e.g. {"Bull Put": 2, "Bear Call": 1}.
+    """
+    _db.init_db()
+    conn = sqlite3.connect(_db.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT type FROM trades WHERE status IN ('open','pending','closing') "
+        "AND tradier_order_id LIKE 'PAPER-AUTO-%'"
+    ).fetchall()
+    conn.close()
+    counts: dict = {}
+    for row in rows:
+        counts[row["type"]] = counts.get(row["type"], 0) + 1
+    return counts
+
+
 def _place_paper_trade(trade: dict, contracts: int, reason: str) -> int:
     """Insert a paper auto trade into the DB and return the row id."""
     short_strike, long_strike = _parse_strikes(trade["legs"])
@@ -356,6 +404,10 @@ def main():
     blocked_sectors = _open_position_sectors(trades)
     _log(f"Blocked sectors (open positions): {blocked_sectors or 'none'}")
 
+    # Same-direction exposure cap — prevent an all-one-way book (anti-monoculture)
+    direction_counts = _open_position_directions()
+    _log(f"Open by direction: {direction_counts or 'none'} (cap {MAX_SAME_DIRECTION}/side)")
+
     candidates = []
     for t in sorted_trades:
         ticker = t["ticker"]
@@ -382,6 +434,9 @@ def main():
             reason = "already have open position in this ticker"
         elif trade_sector != "Unknown" and trade_sector in blocked_sectors:
             reason = f"sector {trade_sector} already occupied by open position"
+        elif direction_counts.get(t["type"], 0) >= MAX_SAME_DIRECTION:
+            reason = (f"{t['type']} at cap "
+                      f"({direction_counts.get(t['type'], 0)}/{MAX_SAME_DIRECTION} same-direction open)")
 
         if reason:
             _log(f"  SKIP {ticker}: {reason}")
@@ -419,6 +474,9 @@ def main():
         sector = trade.get("sector", "Unknown")
         if sector != "Unknown":
             blocked_sectors.add(sector)
+
+        # Count this direction so the same-side cap holds within this run too
+        direction_counts[trade["type"]] = direction_counts.get(trade["type"], 0) + 1
 
         # Recheck balance after each placement to stay within limits
         bal = _paper_balance()

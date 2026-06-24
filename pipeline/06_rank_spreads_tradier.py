@@ -50,7 +50,11 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PARAMS_FILE  = os.path.join(_PROJECT_ROOT, "data", "strategy_params.json")
 
 def _load_strategy_params() -> dict:
-    defaults = {"enter_pop": 74, "enter_roi": 8, "watch_pop": 72, "watch_roi": 5}
+    # Corrected-structure thresholds. With the step-05 credit/width >= 1/3 gate,
+    # every surviving spread already has ROI >= ~50%, so PoP is the real ENTER/WATCH
+    # discriminator. ~30-delta shorts land PoP ~62-70%, so floors sit at 60-65 (NOT
+    # the old 72-76 "high win rate" floors, which structurally forced thin credit).
+    defaults = {"enter_pop": 65, "enter_roi": 40, "watch_pop": 60, "watch_roi": 33}
     try:
         with open(_PARAMS_FILE) as f:
             p = json.load(f)

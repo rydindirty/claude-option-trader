@@ -1,10 +1,18 @@
 {
-  "min_delta": 0.1,
-  "max_delta": 0.2,
-  "min_credit": 1.2,
-  "enter_pop": 74,
-  "enter_roi": 8,
-  "watch_pop": 72,
-  "watch_roi": 5,
-  "_note": "Live strategy parameters. Edited by the Strategy Review tab — do NOT hand-edit. Commit these values to the pipeline defaults before returning to live trading."
+  "min_delta": 0.15,
+  "max_delta": 0.45,
+  "min_credit": 0.30,
+  "min_credit_to_width": 0.33,
+  "max_width": 5.0,
+  "min_pop": 60,
+  "enter_pop": 65,
+  "enter_roi": 40,
+  "watch_pop": 60,
+  "watch_roi": 33,
+  "max_risk_pct": 0.10,
+  "max_open_trades": 4,
+  "max_same_direction": 2,
+  "_note": "Corrected-structure params. The single most important gate is min_credit_to_width: break-even win rate = 1 - (credit/width), so 0.33 implies a 67% break-even, achievable at ~30-delta. max_width caps catastrophic per-trade loss. max_same_direction prevents an all-one-side (monoculture) book.",
+  "_small_account_note": "For a ~$500 account, equity-spread math forces narrow trades: set max_width 1.0 and max_risk_pct 0.15 so a single ~$1-wide spread (max loss ~$67 = ~13% of $500) can clear the sizing gate. $1-wide strikes only exist on lower-priced / $1-strike-increment names, so the tradeable universe shrinks. $500 is a prove-it-live stake (~$16 per win), not an income account.",
+  "_deploy_note": "EC2 data/strategy_params.json is the live source of truth and is NOT auto-synced from this repo file. Apply these values there manually when ready to deploy."
 }
