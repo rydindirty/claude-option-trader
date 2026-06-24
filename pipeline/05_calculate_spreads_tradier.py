@@ -24,6 +24,12 @@ _PARAM_DEFAULTS = {
     "min_credit_to_width": 0.33,  # require credit >= 1/3 of width  (positive expectancy)
     "max_width": 5.0,             # hard cap on spread width (per-trade max-loss control)
     "min_pop": 60,                # PoP floor; ~30-delta shorts land ~62-70%
+    "enable_iron_condors": True,  # also generate directionally-neutral iron condors
+    "ic_min_delta": 0.10,         # per-side short delta band for IC legs (lower than a
+    "ic_max_delta": 0.25,         #   single vertical — two premiums clear credit/width)
+    "ic_min_pop": 50,             # IC between-shorts PoP floor. Lower than a vertical's:
+                                  #   an IC's edge is 2 premiums + 50% mgmt + vol premium,
+                                  #   not high PoP. credit/width ≥ 1/3 stays the EV gate.
 }
 
 def _load_params() -> dict:
@@ -53,6 +59,132 @@ def black_scholes_pop(stock_price, strike, dte, iv, is_call, delta=None):
 
     return pop
 
+def build_iron_condors(ticker, stock_price, exp_data, params):
+    """
+    Build at most one iron condor per ticker/expiration: an OTM put credit spread
+    plus an OTM call credit spread, short strikes straddling spot at ~IC delta.
+
+    Why ICs: they collect TWO premiums against ONE width of risk, so the combined
+    credit/width clears the 1/3 floor at a LOWER per-side delta (higher PoP) than a
+    single vertical can — and they are directionally neutral, the structural cure
+    for the Bull-Put monoculture. Returned as one "Iron Condor" candidate carrying
+    both verticals; the auto-trader places it as two linked rows.
+    """
+    dte       = exp_data["dte"]
+    IC_MIN_D  = params["ic_min_delta"]
+    IC_MAX_D  = params["ic_max_delta"]
+    MAX_WIDTH = params["max_width"]
+    MIN_CW    = params["min_credit_to_width"]
+    IC_MIN_POP = params["ic_min_pop"]
+
+    strikes = sorted(exp_data["strikes"], key=lambda s: s["strike"])
+
+    def vertical_candidates(is_call):
+        """All valid OTM credit verticals with short delta in the IC band."""
+        gk           = "call_greeks" if is_call else "put_greeks"
+        bid_k, ask_k = ("call_bid", "call_ask") if is_call else ("put_bid", "put_ask")
+        out = []
+        for idx, ss in enumerate(strikes):
+            if gk not in ss:
+                continue
+            if is_call and ss["strike"] <= stock_price:
+                continue
+            if (not is_call) and ss["strike"] >= stock_price:
+                continue
+            sd = abs(ss[gk]["delta"])
+            if not (IC_MIN_D <= sd <= IC_MAX_D):
+                continue
+            if ss.get(bid_k, 0) <= 0:
+                continue
+            # long leg: widest strike within MAX_WIDTH on the far-OTM side
+            long_leg = None
+            scan = strikes[idx + 1:] if is_call else list(reversed(strikes[:idx]))
+            for ls in scan:
+                w = (ls["strike"] - ss["strike"]) if is_call else (ss["strike"] - ls["strike"])
+                if w <= 0:
+                    continue
+                if w > MAX_WIDTH:
+                    break
+                if ls.get(ask_k, 0) > 0:
+                    long_leg = (ls, w)
+            if not long_leg:
+                continue
+            ls, w = long_leg
+            credit = ss.get(bid_k, 0) - ls.get(ask_k, 0)
+            if credit <= 0:
+                continue
+            pop = black_scholes_pop(stock_price, ss["strike"], dte,
+                                    ss[gk]["iv"], is_call, ss[gk]["delta"])
+            out.append({"short": ss, "long": ls, "width": w,
+                        "credit": credit, "delta": sd, "pop": pop})
+        return out
+
+    puts, calls = vertical_candidates(False), vertical_candidates(True)
+    if not puts or not calls:
+        return []
+
+    # Search put × call pairs; keep the pair with the HIGHEST PoP (most conservative)
+    # that still clears the credit/width EV floor. This naturally selects the
+    # lowest-delta IC that is structurally sound, rather than a fixed target delta.
+    best = None
+    for pv in puts:
+        for cv in calls:
+            if not (pv["short"]["strike"] < stock_price < cv["short"]["strike"]):
+                continue
+            width        = max(pv["width"], cv["width"])
+            total_credit = pv["credit"] + cv["credit"]
+            credit_pct   = total_credit / width
+            if credit_pct < MIN_CW:
+                continue
+            ic_pop = pv["pop"] + cv["pop"] - 100.0   # P(finish between the shorts)
+            if ic_pop < IC_MIN_POP:
+                continue
+            if best is None or ic_pop > best["ic_pop"]:
+                best = {"pv": pv, "cv": cv, "width": width,
+                        "total_credit": total_credit, "credit_pct": credit_pct,
+                        "ic_pop": ic_pop}
+    if best is None:
+        return []
+
+    pv, cv       = best["pv"], best["cv"]
+    ps, pl, pw, pcredit, pdelta = pv["short"], pv["long"], pv["width"], pv["credit"], pv["delta"]
+    cs, cl, cw, ccredit, cdelta = cv["short"], cv["long"], cv["width"], cv["credit"], cv["delta"]
+    width        = best["width"]
+    total_credit = best["total_credit"]
+    credit_pct   = best["credit_pct"]
+    ic_pop       = best["ic_pop"]
+    max_loss     = width - total_credit
+    if max_loss <= 0:
+        return []
+    roi = (total_credit / max_loss) * 100
+
+    return [{
+        "ticker": ticker,
+        "type": "Iron Condor",
+        "stock_price": round(stock_price, 2),
+        # generic fields (put side) so steps 06/07 work without IC awareness
+        "short_strike": ps["strike"],
+        "long_strike": pl["strike"],
+        "width": round(width, 2),
+        "net_credit": round(total_credit, 2),
+        "credit_pct": round(credit_pct * 100, 1),
+        "max_loss": round(max_loss, 2),
+        "roi": round(roi, 1),
+        "pop": round(ic_pop, 1),
+        "short_iv": round(ps["put_greeks"]["iv"] * 100, 1),
+        "short_delta": round((pdelta + cdelta) / 2, 2),
+        "expiration": {"date": exp_data["expiration_date"], "dte": dte},
+        # IC-specific legs (consumed by step 07 + paper_auto_trader)
+        "ic": {
+            "short_put": ps["strike"],  "long_put": pl["strike"],
+            "short_call": cs["strike"], "long_call": cl["strike"],
+            "put_credit": round(pcredit, 2), "call_credit": round(ccredit, 2),
+            "put_width": round(pw, 2),       "call_width": round(cw, 2),
+            "put_delta": round(pdelta, 2),   "call_delta": round(cdelta, 2),
+        },
+    }]
+
+
 def calculate_spreads():
     print("="*60)
     print("STEP 5: Calculate Spreads (Black-Scholes)")
@@ -65,8 +197,11 @@ def calculate_spreads():
     MIN_CREDIT_TO_WIDTH  = params["min_credit_to_width"]
     MAX_WIDTH            = params["max_width"]
     MIN_POP              = params["min_pop"]
+    ENABLE_IC            = params["enable_iron_condors"]
     print(f"   Params: delta {MIN_DELTA}–{MAX_DELTA} | min_credit ${MIN_CREDIT:.2f} | "
           f"credit/width ≥ {MIN_CREDIT_TO_WIDTH:.0%} | max_width ${MAX_WIDTH:.0f} | PoP ≥ {MIN_POP}%")
+    print(f"   Iron condors: {'ON' if ENABLE_IC else 'off'} "
+          f"(per-side delta {params['ic_min_delta']}–{params['ic_max_delta']})")
 
     with open("data/chains_with_greeks.json", "r") as f:
         data = json.load(f)
@@ -253,7 +388,11 @@ def calculate_spreads():
                             "expiration": {"date": exp_data["expiration_date"], "dte": dte}
                         }
                         all_spreads.append(spread)
-        
+
+            # Iron Condors — one neutral candidate per ticker/expiration
+            if ENABLE_IC:
+                all_spreads.extend(build_iron_condors(ticker, stock_price, exp_data, params))
+
         ticker_spreads = len([s for s in all_spreads if s["ticker"] == ticker])
         print(f"   ✅ {ticker_spreads} quality spreads")
     

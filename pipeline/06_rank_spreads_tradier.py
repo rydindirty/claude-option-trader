@@ -62,6 +62,10 @@ def _load_strategy_params() -> dict:
     except Exception:
         return defaults
 
+# Kronos demotion: clamp its ranking multiplier to a narrow band (was ±20% in 01d).
+_KRONOS_CLAMP_LO = 0.94
+_KRONOS_CLAMP_HI = 1.06
+
 _TECH_MULTIPLIERS = {
     "strong_bullish": {"Bull Put": 1.15, "Bear Call": 0.85},
     "bullish":        {"Bull Put": 1.08, "Bear Call": 0.93},
@@ -191,23 +195,27 @@ def rank_spreads():
         # PoP-primary base score: higher PoP always wins vs lower PoP at same ROI
         base_score = pop * (1 + roi / 100)
 
-        # Regime multiplier
-        regime_mult = (regime["bull_put_multiplier"] if spread_type == "Bull Put"
-                       else regime["bear_call_multiplier"])
-
-        # Technical multiplier
-        signal    = tech_map.get(ticker, "neutral")
-        tech_mult = _TECH_MULTIPLIERS.get(signal, _TECH_MULTIPLIERS["neutral"])[spread_type]
-
-        # Peer z-score multiplier
-        peer_mult = peer_map.get(ticker, 1.0)
-
-        # Kronos AI multiplier
+        is_ic = spread_type == "Iron Condor"
         kronos_ticker = kronos_map.get(ticker, {})
-        if spread_type == "Bull Put":
-            kronos_mult = kronos_ticker.get("bull_put", 1.0)
+
+        if is_ic:
+            # Iron condors are directionally neutral — directional tilts don't apply.
+            regime_mult = tech_mult = peer_mult = kronos_mult = 1.0
+            signal = "neutral"
         else:
-            kronos_mult = kronos_ticker.get("bear_call", 1.0)
+            # Regime multiplier
+            regime_mult = (regime["bull_put_multiplier"] if spread_type == "Bull Put"
+                           else regime["bear_call_multiplier"])
+            # Technical multiplier
+            signal    = tech_map.get(ticker, "neutral")
+            tech_mult = _TECH_MULTIPLIERS.get(signal, _TECH_MULTIPLIERS["neutral"])[spread_type]
+            # Peer z-score multiplier
+            peer_mult = peer_map.get(ticker, 1.0)
+            # Kronos AI multiplier — DEMOTED: clamped to a narrow ranking tilt (was ±20%).
+            # It nudges ranking; it no longer vetoes a structurally-sound trade (block removed below).
+            raw_k = (kronos_ticker.get("bull_put", 1.0) if spread_type == "Bull Put"
+                     else kronos_ticker.get("bear_call", 1.0))
+            kronos_mult = min(max(raw_k, _KRONOS_CLAMP_LO), _KRONOS_CLAMP_HI)
 
         spread["score"]             = round(base_score * regime_mult * tech_mult * peer_mult * kronos_mult, 1)
         spread["regime_multiplier"] = regime_mult
@@ -218,27 +226,19 @@ def rank_spreads():
         spread["kronos_direction"]  = kronos_ticker.get("direction", "n/a")
         spread["kronos_forecast_pct"] = kronos_ticker.get("forecast_pct", 0.0)
 
-        # ── Kronos hard block ──────────────────────────────────────────────────
-        # If Kronos strongly forecasts a move that OPPOSES the spread direction,
-        # force SKIP regardless of PoP/ROI. A 0.80× multiplier is not enough
-        # when the forecast is 5%+ against the trade (e.g. -10.77% on a Bull Put).
-        # Bull Put needs stock to stay UP  → bearish forecast ≥5% = hard block
-        # Bear Call needs stock to stay DN → bullish forecast ≥5% = hard block
-        kronos_dir = kronos_ticker.get("direction", "neutral")
-        kronos_fc  = kronos_ticker.get("forecast_pct", 0.0)
-        kronos_blocked = False
-        if spread_type == "Bull Put" and kronos_dir == "bearish" and abs(kronos_fc) >= 5.0:
-            spread["decision"]    = "SKIP"
-            spread["skip_reason"] = f"Kronos {kronos_fc:+.1f}% bearish — opposes Bull Put"
-            kronos_blocked = True
-        elif spread_type == "Bear Call" and kronos_dir == "bullish" and abs(kronos_fc) >= 5.0:
-            spread["decision"]    = "SKIP"
-            spread["skip_reason"] = f"Kronos {kronos_fc:+.1f}% bullish — opposes Bear Call"
-            kronos_blocked = True
+        # ── Kronos DEMOTED ─────────────────────────────────────────────────────
+        # The old hard SKIP (forecast ≥5% opposing the trade) is removed. It was a
+        # directional veto on a strategy whose edge is theta + the OTM cushion, not
+        # being right about direction — and it was a major contributor to stalled
+        # trade flow. Kronos now only nudges ranking via its clamped multiplier above.
 
         # Regime-adjusted ENTER / WATCH / SKIP thresholds
-        if kronos_blocked:
-            pass  # decision already set above
+        if is_ic:
+            # Iron condors are pre-qualified by step 05's structural gate
+            # (credit/width ≥ 1/3 and PoP ≥ ic_min_pop), and their PoP is
+            # structurally lower than a vertical's — so don't re-judge them on the
+            # vertical PoP floors. Any IC that reached here is a tradeable ENTER.
+            spread["decision"] = "ENTER"
         elif regime.get("block_bull_puts") and spread_type == "Bull Put":
             spread["decision"] = "SKIP"
             spread["skip_reason"] = "VIX shock — Bull Put entries blocked"
@@ -251,11 +251,16 @@ def rank_spreads():
 
     spreads.sort(key=lambda x: x["score"], reverse=True)
 
-    seen_tickers = set()
+    # Keep the best directional vertical AND the best iron condor per ticker, so a
+    # neutral IC isn't crowded out by a higher-PoP vertical on the same name (they
+    # are different structures serving different regimes). Spreads are score-sorted,
+    # so the first of each kind per ticker is its best.
+    seen = set()
     unique_spreads = []
     for spread in spreads:
-        if spread["ticker"] not in seen_tickers:
-            seen_tickers.add(spread["ticker"])
+        key = (spread["ticker"], spread["type"] == "Iron Condor")
+        if key not in seen:
+            seen.add(key)
             unique_spreads.append(spread)
 
     for i, spread in enumerate(unique_spreads):

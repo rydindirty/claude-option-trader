@@ -51,16 +51,26 @@ def load_comprehensive_data():
         if ticker in data["prices"]:
             trade["current_price"] = data["prices"][ticker]["mid"]
 
-        strikes = trade["legs"].replace("$", "").split("/")
-        trade["short_strike"] = float(strikes[0])
-        trade["long_strike"] = float(strikes[1])
-
-        if "current_price" in trade:
-            current = trade["current_price"]
-            if "Put" in trade["type"]:
-                trade["buffer_pct"] = (current - trade["short_strike"]) / current * 100
-            else:
-                trade["buffer_pct"] = (trade["short_strike"] - current) / current * 100
+        ic = trade.get("ic")
+        if trade["type"] == "Iron Condor" and ic:
+            # IC legs string isn't a simple short/long pair — use the structured legs.
+            trade["short_strike"] = float(ic["short_put"])
+            trade["long_strike"]  = float(ic["long_put"])
+            if "current_price" in trade:
+                current  = trade["current_price"]
+                put_buf  = (current - ic["short_put"]) / current * 100
+                call_buf = (ic["short_call"] - current) / current * 100
+                trade["buffer_pct"] = round(min(put_buf, call_buf), 1)  # nearer breach
+        else:
+            strikes = trade["legs"].replace("$", "").split("/")
+            trade["short_strike"] = float(strikes[0])
+            trade["long_strike"] = float(strikes[1])
+            if "current_price" in trade:
+                current = trade["current_price"]
+                if "Put" in trade["type"]:
+                    trade["buffer_pct"] = (current - trade["short_strike"]) / current * 100
+                else:
+                    trade["buffer_pct"] = (trade["short_strike"] - current) / current * 100
 
     return data
 

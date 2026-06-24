@@ -52,6 +52,9 @@ _MIGRATIONS = [
     "ALTER TABLE trades ADD COLUMN regime TEXT",
     "ALTER TABLE trades ADD COLUMN notes TEXT",
     "ALTER TABLE trades ADD COLUMN alert_sent INTEGER NOT NULL DEFAULT 0",
+    # Links the two vertical rows of an iron condor (same value on put + call leg).
+    # NULL for standalone verticals.
+    "ALTER TABLE trades ADD COLUMN group_id TEXT",
 ]
 
 
@@ -88,15 +91,16 @@ def insert_open_trade(position: dict, status: str = "open") -> int:
             ticker, type, short_strike, long_strike, expiration,
             dte_at_entry, credit_received, max_profit, max_loss,
             contracts, short_symbol, long_symbol, tradier_order_id,
-            opened_at, profit_target_pct, stop_loss_pct, regime, status
+            opened_at, profit_target_pct, stop_loss_pct, regime, status, group_id
         ) VALUES (
             :ticker, :type, :short_strike, :long_strike, :expiration,
             :dte_at_entry, :credit_received, :max_profit, :max_loss,
             :contracts, :short_symbol, :long_symbol, :tradier_order_id,
-            :opened_at, :profit_target_pct, :stop_loss_pct, :regime, :status
+            :opened_at, :profit_target_pct, :stop_loss_pct, :regime, :status, :group_id
         )
         """,
-        {**position, "regime": position.get("regime"), "status": status},
+        {**position, "regime": position.get("regime"),
+         "status": status, "group_id": position.get("group_id")},
     )
     conn.commit()
     row_id = cur.lastrowid

@@ -336,6 +336,61 @@ def _place_paper_trade(trade: dict, contracts: int, reason: str) -> int:
     return row_id
 
 
+def _place_iron_condor(trade: dict, contracts: int, reason: str) -> list:
+    """
+    Insert an iron condor as TWO linked vertical rows (put side + call side) sharing
+    a group_id. The monitor then manages each side independently with the existing
+    50%-target / width-cap rules (i.e. legging out), so no monitor changes are needed.
+
+    The structure's true combined max loss (width − total_credit) is split evenly
+    across the two rows so reserved capital matches broker-style IC margin (one side),
+    not double-counted. The width-cap (strike-based) remains the real risk control.
+    """
+    ic = trade["ic"]
+    ticker, expiration = trade["ticker"], trade["exp_date"]
+    ic_max_loss = float(trade["max_loss"].replace("$", ""))   # width − total_credit
+    half_ml     = round(ic_max_loss / 2.0, 2)
+    ts          = int(datetime.now().timestamp())
+    group_id    = f"IC-{ticker}-{ts}"
+
+    regime = None
+    try:
+        with open(DATA_DIR / "macro_regime.json") as f:
+            regime = json.load(f).get("regime_label")
+    except Exception:
+        pass
+
+    legs = [
+        ("Bull Put",  "put",  ic["short_put"],  ic["long_put"],  ic["put_credit"]),
+        ("Bear Call", "call", ic["short_call"], ic["long_call"], ic["call_credit"]),
+    ]
+    row_ids = []
+    for i, (ltype, opt_type, short_k, long_k, credit) in enumerate(legs):
+        row_id = _db.insert_open_trade({
+            "ticker": ticker,
+            "type": ltype,
+            "short_strike": short_k,
+            "long_strike": long_k,
+            "expiration": expiration,
+            "dte_at_entry": trade["dte"],
+            "credit_received": credit,
+            "max_profit": credit,
+            "max_loss": half_ml,
+            "contracts": contracts,
+            "short_symbol": _build_option_symbol(ticker, expiration, opt_type, short_k),
+            "long_symbol":  _build_option_symbol(ticker, expiration, opt_type, long_k),
+            "tradier_order_id": f"PAPER-AUTO-{ticker}-{ts}-{i}",
+            "opened_at": datetime.now().isoformat(),
+            "profit_target_pct": 0.50,
+            "stop_loss_pct": 1.50,
+            "regime": regime,
+            "group_id": group_id,
+        }, status="open")
+        _db.save_trade_notes(row_id, f"{NOTE_PREFIX} [IC {group_id}] {reason}")
+        row_ids.append(row_id)
+    return row_ids
+
+
 # ─── main ─────────────────────────────────────────────────────────────────────
 def main():
     force = "--force" in sys.argv
@@ -462,21 +517,31 @@ def main():
             f"heat={heat.get(ticker, '?')} regime={trade.get('kronos_direction', 'n/a')}"
         )
 
-        row_id = _place_paper_trade(trade, contracts=1, reason=reason)
-        _log(
-            f"  ENTER {ticker} {trade['type']} {trade['legs']} "
-            f"x1 credit={trade['net_credit']} max_loss=${max_loss:.2f} "
-            f"sector={trade.get('sector', '?')} | DB#{row_id}"
-        )
+        if trade["type"] == "Iron Condor" and trade.get("ic"):
+            row_ids = _place_iron_condor(trade, contracts=1, reason=reason)
+            _log(
+                f"  ENTER {ticker} Iron Condor {trade['legs']} "
+                f"x1 credit={trade['net_credit']} max_loss=${max_loss:.2f} "
+                f"sector={trade.get('sector', '?')} | DB#{row_ids} (linked legs)"
+            )
+            # An IC is balanced — count it toward BOTH direction tallies
+            direction_counts["Bull Put"]  = direction_counts.get("Bull Put", 0) + 1
+            direction_counts["Bear Call"] = direction_counts.get("Bear Call", 0) + 1
+        else:
+            row_id = _place_paper_trade(trade, contracts=1, reason=reason)
+            _log(
+                f"  ENTER {ticker} {trade['type']} {trade['legs']} "
+                f"x1 credit={trade['net_credit']} max_loss=${max_loss:.2f} "
+                f"sector={trade.get('sector', '?')} | DB#{row_id}"
+            )
+            # Count this direction so the same-side cap holds within this run too
+            direction_counts[trade["type"]] = direction_counts.get(trade["type"], 0) + 1
         placed += 1
 
         # Block this sector for any further placements this run
         sector = trade.get("sector", "Unknown")
         if sector != "Unknown":
             blocked_sectors.add(sector)
-
-        # Count this direction so the same-side cap holds within this run too
-        direction_counts[trade["type"]] = direction_counts.get(trade["type"], 0) + 1
 
         # Recheck balance after each placement to stay within limits
         bal = _paper_balance()

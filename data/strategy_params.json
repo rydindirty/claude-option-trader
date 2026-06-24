@@ -12,6 +12,10 @@
   "max_risk_pct": 0.10,
   "max_open_trades": 4,
   "max_same_direction": 2,
+  "enable_iron_condors": true,
+  "ic_min_delta": 0.10,
+  "ic_max_delta": 0.25,
+  "ic_min_pop": 50,
   "_note": "Corrected-structure params. The single most important gate is min_credit_to_width: break-even win rate = 1 - (credit/width), so 0.33 implies a 67% break-even, achievable at ~30-delta. max_width caps catastrophic per-trade loss. max_same_direction prevents an all-one-side (monoculture) book.",
   "_small_account_note": "For a ~$500 account, equity-spread math forces narrow trades: set max_width 1.0 and max_risk_pct 0.15 so a single ~$1-wide spread (max loss ~$67 = ~13% of $500) can clear the sizing gate. $1-wide strikes only exist on lower-priced / $1-strike-increment names, so the tradeable universe shrinks. $500 is a prove-it-live stake (~$16 per win), not an income account.",
   "_deploy_note": "EC2 data/strategy_params.json is the live source of truth and is NOT auto-synced from this repo file. Apply these values there manually when ready to deploy."

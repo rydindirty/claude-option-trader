@@ -39,13 +39,20 @@ def build_report_table():
     
     for spread in spreads:
         ticker = spread["ticker"]
-        
+
+        ic = spread.get("ic")
+        if spread["type"] == "Iron Condor" and ic:
+            legs = (f"P${ic['short_put']:.0f}/${ic['long_put']:.0f} "
+                    f"C${ic['short_call']:.0f}/${ic['long_call']:.0f}")
+        else:
+            legs = f"${spread['short_strike']:.0f}/${spread['long_strike']:.0f}"
+
         entry = {
             "rank": spread["rank"],
             "sector": sector_map.get(ticker, "Unknown"),
             "ticker": ticker,
             "type": spread["type"],
-            "legs": f"${spread['short_strike']:.0f}/${spread['long_strike']:.0f}",
+            "legs": legs,
             "exp_date": spread["expiration"]["date"],
             "dte": spread["expiration"]["dte"],
             "roi": f"{spread['roi']}%",
@@ -58,7 +65,8 @@ def build_report_table():
             "delta": spread["short_delta"],
             "score": spread["score"],
             "kronos_direction": spread.get("kronos_direction", "n/a"),
-            "kronos_forecast_pct": spread.get("kronos_forecast_pct", 0.0)
+            "kronos_forecast_pct": spread.get("kronos_forecast_pct", 0.0),
+            "ic": ic,  # full 4-leg detail for the auto-trader (None for verticals)
         }
         report_entries.append(entry)
     

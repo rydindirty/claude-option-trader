@@ -262,6 +262,18 @@ def parse_strikes(legs_str):
     return float(parts[0]), float(parts[1])
 
 
+def _trade_strikes(trade):
+    """
+    (short, long) strikes for display/insert. Iron condors carry 4 legs in a
+    structured `ic` dict, so their `legs` string ("P$x/$y C$a/$b") can't be split
+    like a vertical — use the put side for the representative short/long.
+    """
+    ic = trade.get("ic")
+    if trade.get("type") == "Iron Condor" and ic:
+        return float(ic["short_put"]), float(ic["long_put"])
+    return parse_strikes(trade["legs"])
+
+
 def build_option_symbol(ticker, expiration, option_type, strike):
     exp = expiration.replace("-", "")[2:]
     otype = "P" if option_type == "put" else "C"
@@ -358,6 +370,11 @@ async def _alert_monitor_loop():
 
 
 def _order_payload(trade, contracts, preview=False):
+    if trade.get("type") == "Iron Condor":
+        raise ValueError(
+            "Live iron-condor orders are not supported yet — ICs are placed as two "
+            "paper verticals by the auto-trader. Keep PAPER_TRADING=1 for iron condors."
+        )
     short_strike, long_strike = parse_strikes(trade["legs"])
     is_bear_call = "Bear Call" in trade.get("type", "")
     opt_type = "call" if is_bear_call else "put"
@@ -412,11 +429,41 @@ def get_tradier_order(order_id) -> dict:
 
 
 def save_placed_trade(trade, contracts, order_response, status: str = "pending"):
+    ticker, expiration = trade["ticker"], trade["exp_date"]
+    order_id = order_response.get("order", {}).get("id", "unknown")
+    ic = trade.get("ic")
+
+    # Iron condor → two linked vertical rows (same scheme as paper_auto_trader).
+    if trade.get("type") == "Iron Condor" and ic:
+        ic_max_loss = float(trade["max_loss"].replace("$", ""))
+        half_ml     = round(ic_max_loss / 2.0, 2)
+        group_id    = f"IC-{ticker}-{int(datetime.now().timestamp())}"
+        legs = [
+            ("Bull Put",  "put",  ic["short_put"],  ic["long_put"],  ic["put_credit"]),
+            ("Bear Call", "call", ic["short_call"], ic["long_call"], ic["call_credit"]),
+        ]
+        first_id = None
+        for i, (ltype, opt_type, sk, lk, cr) in enumerate(legs):
+            rid = db.insert_open_trade({
+                "ticker": ticker, "type": ltype,
+                "short_strike": sk, "long_strike": lk,
+                "expiration": expiration, "dte_at_entry": trade["dte"],
+                "credit_received": cr, "max_profit": cr, "max_loss": half_ml,
+                "contracts": contracts,
+                "short_symbol": build_option_symbol(ticker, expiration, opt_type, sk),
+                "long_symbol":  build_option_symbol(ticker, expiration, opt_type, lk),
+                "tradier_order_id": f"{order_id}-{i}",
+                "opened_at": datetime.now().isoformat(),
+                "profit_target_pct": 0.50, "stop_loss_pct": 1.50,
+                "regime": _read_regime(), "group_id": group_id,
+            }, status=status)
+            first_id = first_id or rid
+        return first_id
+
     short_strike, long_strike = parse_strikes(trade["legs"])
     credit = float(trade["net_credit"].replace("$", ""))
     max_loss = float(trade["max_loss"].replace("$", ""))
     opt_type = "call" if "Bear Call" in trade.get("type", "") else "put"
-    ticker, expiration = trade["ticker"], trade["exp_date"]
     return db.insert_open_trade({
         "ticker": ticker,
         "type": trade["type"],
@@ -554,7 +601,7 @@ async def api_trades(request: Request):
         ticker = t["ticker"].upper()
         rec = recommendations.get(ticker, "UNKNOWN")
         heat = heat_scores.get(ticker)
-        short_strike, long_strike = parse_strikes(t["legs"])
+        short_strike, long_strike = _trade_strikes(t)
         credit = float(t["net_credit"].replace("$", ""))
         max_loss = float(t["max_loss"].replace("$", ""))
         r = rationale.get(ticker, {})
