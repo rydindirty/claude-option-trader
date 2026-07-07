@@ -24,12 +24,18 @@ _PARAM_DEFAULTS = {
     "min_credit_to_width": 0.33,  # require credit >= 1/3 of width  (positive expectancy)
     "max_width": 5.0,             # hard cap on spread width (per-trade max-loss control)
     "min_pop": 60,                # PoP floor; ~30-delta shorts land ~62-70%
+    "min_dte": 35,                # enter far enough out that theta can work BEFORE the
+    "max_dte": 45,                #   monitor's 21-DTE time stop (was 21 → trades entered
+                                  #   at ~22 DTE and got time-stopped ~1 day later).
     "enable_iron_condors": True,  # also generate directionally-neutral iron condors
     "ic_min_delta": 0.10,         # per-side short delta band for IC legs (lower than a
     "ic_max_delta": 0.25,         #   single vertical — two premiums clear credit/width)
     "ic_min_pop": 50,             # IC between-shorts PoP floor. Lower than a vertical's:
                                   #   an IC's edge is 2 premiums + 50% mgmt + vol premium,
                                   #   not high PoP. credit/width ≥ 1/3 stays the EV gate.
+    "ic_min_leg_credit_pct": 0.12,# EACH IC leg must clear this credit/width. Prevents a
+                                  #   lopsided condor (e.g. a 4%-credit throwaway put +
+                                  #   a 30%-credit call = a directional bet, not neutral).
 }
 
 def _load_params() -> dict:
@@ -76,6 +82,7 @@ def build_iron_condors(ticker, stock_price, exp_data, params):
     MAX_WIDTH = params["max_width"]
     MIN_CW    = params["min_credit_to_width"]
     IC_MIN_POP = params["ic_min_pop"]
+    IC_MIN_LEG_CW = params["ic_min_leg_credit_pct"]
 
     strikes = sorted(exp_data["strikes"], key=lambda s: s["strike"])
 
@@ -132,6 +139,10 @@ def build_iron_condors(ticker, stock_price, exp_data, params):
             if not (pv["short"]["strike"] < stock_price < cv["short"]["strike"]):
                 continue
             width        = max(pv["width"], cv["width"])
+            # Each leg must pull its weight — no lopsided (secretly directional) condor
+            if (pv["credit"] / pv["width"] < IC_MIN_LEG_CW or
+                    cv["credit"] / cv["width"] < IC_MIN_LEG_CW):
+                continue
             total_credit = pv["credit"] + cv["credit"]
             credit_pct   = total_credit / width
             if credit_pct < MIN_CW:
@@ -197,6 +208,8 @@ def calculate_spreads():
     MIN_CREDIT_TO_WIDTH  = params["min_credit_to_width"]
     MAX_WIDTH            = params["max_width"]
     MIN_POP              = params["min_pop"]
+    MIN_DTE              = params["min_dte"]
+    MAX_DTE              = params["max_dte"]
     ENABLE_IC            = params["enable_iron_condors"]
     print(f"   Params: delta {MIN_DELTA}–{MAX_DELTA} | min_credit ${MIN_CREDIT:.2f} | "
           f"credit/width ≥ {MIN_CREDIT_TO_WIDTH:.0%} | max_width ${MAX_WIDTH:.0f} | PoP ≥ {MIN_POP}%")
@@ -250,8 +263,8 @@ def calculate_spreads():
         for exp_data in expirations:
             dte = exp_data["dte"]
             
-            if dte < 21 or dte > 45:
-                continue  # Only trade spreads with 21-45 DTE
+            if dte < MIN_DTE or dte > MAX_DTE:
+                continue  # runway before the 21-DTE time stop (default 35-45 DTE)
             
             strikes = exp_data["strikes"]
             
