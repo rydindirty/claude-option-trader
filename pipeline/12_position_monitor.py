@@ -359,35 +359,10 @@ def check_positions():
         print(f"  Current spread value: ${current_value:.2f} | "
               f"P&L: {profit_pct:.1f}% of max profit")
 
-        trade_id = pos["id"]
-
-        # ── Update peak profit tracker ─────────────────────────
-        peak = max(profit_pct, _peak_profit.get(trade_id, 0.0))
-        _peak_profit[trade_id] = peak
-
-        # ── Fluid Rule A: Trailing profit stop ─────────────────
-        # If profit peaked above _TRAIL_TRIGGER_PCT and has since
-        # fallen _TRAIL_DROP_PCT points below that peak, close now.
-        if peak >= _TRAIL_TRIGGER_PCT:
-            trail_threshold = peak - _TRAIL_DROP_PCT
-            if profit_pct < trail_threshold:
-                print(f"  📉 TRAILING STOP — peaked at {peak:.1f}%, "
-                      f"now {profit_pct:.1f}% "
-                      f"(dropped {peak - profit_pct:.1f} pts from peak)")
-                try:
-                    response = place_closing_order(pos, current_value)
-                    profit   = log_closed_trade(
-                        pos, "trailing_stop", current_value, response)
-                    print(f"  ✅ Closed at ${current_value:.2f} | "
-                          f"P&L: ${profit:.2f}")
-                    send_sms(f"DickTrades CLOSED {ticker} | Trailing Stop | "
-                             f"${current_value:.2f} | P&L: ${profit:+.2f}")
-                except Exception as e:
-                    print(f"  ❌ Close failed: {e}")
-                    remaining.append(pos)
-                continue
-
-        # ── Rule 1: Profit target (40%) ────────────────────────
+        # ── Rule 1: Profit target (50%) ────────────────────────
+        # Trailing stop removed 2026-07-09 — it triggered at 25% and capped winners
+        # short of the 50% target (e.g. closed a leg at 21% for +$12 vs a $28 target).
+        # Winners now close at the 50% target; the DTE entry fix gives them the runway.
         target = credit * (1 - pos["profit_target_pct"])
         if current_value <= target:
             print(f"  🎯 PROFIT TARGET hit — "
@@ -452,12 +427,6 @@ def check_positions():
 # DELTA_STOP removed 2026-06-02 — see backtest_results.json. Delta is now
 # fetched for telemetry only via get_short_delta(); does not trigger a close.
 MAX_WIDTH_PCT = 0.80   # hard cap: close if spread value > 80% of max width
-
-# ── In-memory state for fluid stops (reset each monitor session) ──────────────
-# Trailing profit: tracks peak profit % seen so far per trade id
-_peak_profit: dict[int, float] = {}
-_TRAIL_TRIGGER_PCT = 25.0  # profit must have hit this % before trailing
-_TRAIL_DROP_PCT   = 10.0   # close if profit drops this many points from peak
 
 
 LOCK_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
