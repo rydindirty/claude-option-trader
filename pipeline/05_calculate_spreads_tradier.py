@@ -17,12 +17,26 @@ _PARAMS_FILE = os.path.join(_PROJECT_ROOT, "data", "strategy_params.json")
 # fraction of width. min_credit_to_width is the single most important gate —
 # break-even win rate = 1 - (credit/width), so 0.33 implies a 67% break-even.
 # max_width caps catastrophic per-trade loss (the DDOG/AXON wide-spread problem).
+#
+# max_width was a FLAT dollar cap for every ticker regardless of price (2026-07
+# audit: on a normal day 20/21 candidates produced zero spreads because a $5
+# width forces >=$1.65 credit at 35-45 DTE/15-45 delta — only a handful of
+# high-price, high-IV megacaps can generate that much premium in a fixed $5
+# window). max_width_pct scales the effective cap to each ticker's own price
+# so cheaper/lower-vol names get a proportionally reachable width+credit
+# target instead of being structurally excluded; max_width remains the
+# absolute ceiling (so expensive names don't get an oversized width), and
+# paper_auto_trader's max_risk_pct gate still blocks any trade too large for
+# the account regardless of how wide effective_max_width computes.
 _PARAM_DEFAULTS = {
     "min_delta": 0.15,
     "max_delta": 0.45,
     "min_credit": 0.30,           # absolute $ floor; real gate is credit/width below
     "min_credit_to_width": 0.33,  # require credit >= 1/3 of width  (positive expectancy)
-    "max_width": 5.0,             # hard cap on spread width (per-trade max-loss control)
+    "max_width": 5.0,             # absolute ceiling on spread width regardless of price
+    "max_width_pct": 0.02,        # width also scales with price: effective cap =
+                                  #   clamp(price * max_width_pct, min_width, max_width)
+    "min_width": 1.0,             # floor so very cheap tickers still get a workable width
     "min_pop": 60,                # PoP floor; ~30-delta shorts land ~62-70%
     "min_dte": 35,                # enter far enough out that theta can work BEFORE the
     "max_dte": 45,                #   monitor's 21-DTE time stop (was 21 → trades entered
@@ -65,6 +79,16 @@ def black_scholes_pop(stock_price, strike, dte, iv, is_call, delta=None):
 
     return pop
 
+def effective_max_width(stock_price, params):
+    """
+    Per-ticker width cap: scales with the underlying's price so a $50 stock
+    and a $400 stock aren't held to the same flat dollar width. Clamped
+    between min_width (floor, so cheap names still get a usable width) and
+    max_width (ceiling, so expensive names don't get an oversized one).
+    """
+    pct_width = stock_price * params["max_width_pct"]
+    return round(min(params["max_width"], max(params["min_width"], pct_width)), 2)
+
 def build_iron_condors(ticker, stock_price, exp_data, params):
     """
     Build at most one iron condor per ticker/expiration: an OTM put credit spread
@@ -79,7 +103,7 @@ def build_iron_condors(ticker, stock_price, exp_data, params):
     dte       = exp_data["dte"]
     IC_MIN_D  = params["ic_min_delta"]
     IC_MAX_D  = params["ic_max_delta"]
-    MAX_WIDTH = params["max_width"]
+    MAX_WIDTH = effective_max_width(stock_price, params)
     MIN_CW    = params["min_credit_to_width"]
     IC_MIN_POP = params["ic_min_pop"]
     IC_MIN_LEG_CW = params["ic_min_leg_credit_pct"]
@@ -206,13 +230,14 @@ def calculate_spreads():
     MAX_DELTA            = params["max_delta"]
     MIN_CREDIT           = params["min_credit"]
     MIN_CREDIT_TO_WIDTH  = params["min_credit_to_width"]
-    MAX_WIDTH            = params["max_width"]
     MIN_POP              = params["min_pop"]
     MIN_DTE              = params["min_dte"]
     MAX_DTE              = params["max_dte"]
     ENABLE_IC            = params["enable_iron_condors"]
     print(f"   Params: delta {MIN_DELTA}–{MAX_DELTA} | min_credit ${MIN_CREDIT:.2f} | "
-          f"credit/width ≥ {MIN_CREDIT_TO_WIDTH:.0%} | max_width ${MAX_WIDTH:.0f} | PoP ≥ {MIN_POP}%")
+          f"credit/width ≥ {MIN_CREDIT_TO_WIDTH:.0%} | max_width "
+          f"${params['min_width']:.0f}-${params['max_width']:.0f} "
+          f"(scaled {params['max_width_pct']:.1%} of price) | PoP ≥ {MIN_POP}%")
     print(f"   Iron condors: {'ON' if ENABLE_IC else 'off'} "
           f"(per-side delta {params['ic_min_delta']}–{params['ic_max_delta']})")
 
@@ -258,8 +283,9 @@ def calculate_spreads():
             if strike.get("put_greeks", {}).get("iv", 0) > 0
         )
         iv_note = "live IV" if ticker_iv > 0 else "delta PoP"
-        print(f"\n{ticker}: ${stock_price:.2f} [{iv_note}]")
-        
+        MAX_WIDTH = effective_max_width(stock_price, params)
+        print(f"\n{ticker}: ${stock_price:.2f} [{iv_note}] (max_width ${MAX_WIDTH:.2f})")
+
         for exp_data in expirations:
             dte = exp_data["dte"]
             

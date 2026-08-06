@@ -4,6 +4,8 @@
   "min_credit": 0.30,
   "min_credit_to_width": 0.33,
   "max_width": 5.0,
+  "max_width_pct": 0.02,
+  "min_width": 1.0,
   "min_pop": 60,
   "min_dte": 35,
   "max_dte": 45,
@@ -20,6 +22,7 @@
   "ic_min_pop": 50,
   "ic_min_leg_credit_pct": 0.12,
   "_note": "Corrected-structure params (hand-edit freely — the auto Strategy Review was removed). Key gate is min_credit_to_width: break-even win rate = 1 - (credit/width), so 0.33 => 67% break-even at ~30-delta. min_dte keeps entries far enough out that theta works before the 21-DTE time stop. ic_min_leg_credit_pct blocks lopsided (directional) condors. max_same_direction prevents a one-side (monoculture) book.",
+  "_width_scaling_note": "2026-08-06: max_width was a flat $5 for every ticker regardless of price, which meant only high-price/high-IV megacaps could ever generate the required $1.65 credit (33% of $5) — a live audit found 20/21 daily candidates produced zero spreads, all but one day's trade being the same handful of names. max_width_pct now scales the effective per-ticker cap to price (clamped between min_width and max_width), so cheaper/lower-vol names get a reachable width+credit target too. See project_ticker_concentration memory.",
   "_small_account_note": "For a ~$500 account, equity-spread math forces narrow trades: set max_width 1.0 and max_risk_pct 0.15 so a single ~$1-wide spread (max loss ~$67 = ~13% of $500) can clear the sizing gate. $1-wide strikes only exist on lower-priced / $1-strike-increment names, so the tradeable universe shrinks. $500 is a prove-it-live stake (~$16 per win), not an income account.",
   "_deploy_note": "EC2 data/strategy_params.json is the live source of truth and is NOT auto-synced from this repo file. Apply these values there manually when ready to deploy."
 }

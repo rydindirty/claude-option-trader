@@ -85,7 +85,7 @@ def save_positions(positions):
     pass
 
 
-def get_spread_value(short_symbol, long_symbol):
+def get_spread_value(short_symbol, long_symbol, max_value=None):
     """
     Fetch current bid/ask for both legs and return the cost to close
     the spread (debit needed to buy it back).
@@ -93,8 +93,19 @@ def get_spread_value(short_symbol, long_symbol):
     Cost to close = short_ask - long_bid
       (pay ask to buy back the short, receive bid when selling the long)
 
-    Falls back to mid-price if ask or bid is missing.
-    Returns None only if no usable price data is available.
+    Falls back to mid-price if ask or bid is missing, but ONLY when the
+    leg has *some* real quote data. If a leg has no bid AND no ask at
+    all, that leg's true value is unknown — treating it as $0 silently
+    would bias the computed spread value (understating the credit-spread
+    hedge, or crediting a naked short with a bogus windfall), so we
+    refuse to price the spread instead of guessing.
+
+    max_value, if given, hard-clamps the result: a vertical spread can
+    never cost more than its own strike width to close, so any quote
+    that implies otherwise (stale/illiquid marks) is capped there. The
+    result is also floored at 0 for the same reason.
+
+    Returns None if no reliable price data is available.
     """
     symbols = f"{short_symbol},{long_symbol}"
     try:
@@ -121,6 +132,17 @@ def get_spread_value(short_symbol, long_symbol):
         short_q = quote_map.get(short_symbol, {})
         long_q  = quote_map.get(long_symbol, {})
 
+        # A leg with no bid AND no ask has no usable market at all —
+        # don't let it silently become $0 in the formula below.
+        for label, q, sym in (("short", short_q, short_symbol),
+                               ("long",  long_q,  long_symbol)):
+            bid = float(q.get("bid") or 0)
+            ask = float(q.get("ask") or 0)
+            if bid <= 0 and ask <= 0:
+                print(f"   ⚠️  {sym} ({label} leg): no bid AND no ask — "
+                      f"true value unknown, refusing to price this spread")
+                return None
+
         def best_price(q, prefer):
             """Return preferred side; fall back to mid if zero/missing."""
             val = float(q.get(prefer) or 0)
@@ -139,12 +161,22 @@ def get_spread_value(short_symbol, long_symbol):
         if long_fb:
             print(f"   ℹ️  {long_symbol}: no bid — using mid ${long_bid:.2f}")
 
-        if short_ask <= 0 and long_bid <= 0:
-            print(f"   ⚠️  Both legs returned $0 — no usable price data")
-            return None
-
         # Cost to close = buy back short (pay ask) - sell long (receive bid)
-        return round(short_ask - long_bid, 2)
+        cost_to_close = round(short_ask - long_bid, 2)
+
+        # Sanity bound: a vertical spread's value can never exceed its
+        # own width, and can't be negative. Clamp instead of trusting a
+        # bad/stale quote outright (this is what let a $5-wide spread
+        # get "closed" at $8.60 on 2026-07-24 — see MSFT trades 51/52).
+        if max_value is not None and cost_to_close > max_value:
+            print(f"   ⚠️  Computed value ${cost_to_close:.2f} exceeds "
+                  f"spread width ${max_value:.2f} — clamping (bad/stale quote)")
+            cost_to_close = max_value
+        if cost_to_close < 0:
+            print(f"   ⚠️  Computed value ${cost_to_close:.2f} is negative — clamping to $0")
+            cost_to_close = 0.0
+
+        return cost_to_close
 
     except Exception as e:
         print(f"   ⚠️  Quote error: {e}")
@@ -265,10 +297,11 @@ def check_positions():
     today = date.today()
 
     for pos in positions:
-        ticker  = pos["ticker"]
-        credit  = pos["credit_received"]
-        exp     = date.fromisoformat(pos["expiration"])
-        dte     = (exp - today).days
+        ticker       = pos["ticker"]
+        credit       = pos["credit_received"]
+        exp          = date.fromisoformat(pos["expiration"])
+        dte          = (exp - today).days
+        spread_width = abs(pos["short_strike"] - pos["long_strike"])
 
         print(f"\n  {ticker} {pos['type']} "
               f"${pos['short_strike']:.0f}/$"
@@ -287,7 +320,7 @@ def check_positions():
         if dte < 21:
             print(f"  ⏰ TIME STOP triggered — {dte} DTE (past deadline)")
             close_val = get_spread_value(
-                pos["short_symbol"], pos["long_symbol"])
+                pos["short_symbol"], pos["long_symbol"], max_value=spread_width)
             if close_val is None:
                 print(f"  ⚠️  Could not get quote for time stop — skipping")
                 remaining.append(pos)
@@ -314,7 +347,7 @@ def check_positions():
             is_eod = now.hour > 15 or (now.hour == 15 and now.minute >= 30)
             if is_eod:
                 close_val = get_spread_value(
-                    pos["short_symbol"], pos["long_symbol"])
+                    pos["short_symbol"], pos["long_symbol"], max_value=spread_width)
                 if close_val is None:
                     print(f"  ⚠️  21 DTE EOD: no quote — holding")
                     remaining.append(pos)
@@ -348,7 +381,7 @@ def check_positions():
 
         # ── Get current spread value ───────────────────────────
         current_value = get_spread_value(
-            pos["short_symbol"], pos["long_symbol"])
+            pos["short_symbol"], pos["long_symbol"], max_value=spread_width)
 
         if current_value is None:
             print(f"  ⚠️  Could not get quote — skipping this check")
@@ -389,8 +422,7 @@ def check_positions():
         short_delta = get_short_delta(pos["short_symbol"])
 
         # ── Rule 3b: Spread-width hard cap (gap-through protection) ──
-        spread_width = abs(pos["short_strike"] - pos["long_strike"])
-        width_cap    = round(spread_width * MAX_WIDTH_PCT, 2)
+        width_cap = round(spread_width * MAX_WIDTH_PCT, 2)
         if current_value >= width_cap:
             print(f"  🚨 WIDTH CAP triggered — "
                   f"spread at ${current_value:.2f} ≥ "
