@@ -34,8 +34,16 @@ _PARAM_DEFAULTS = {
     "min_credit": 0.30,           # absolute $ floor; real gate is credit/width below
     "min_credit_to_width": 0.33,  # require credit >= 1/3 of width  (positive expectancy)
     "max_width": 5.0,             # absolute ceiling on spread width regardless of price
-    "max_width_pct": 0.02,        # width also scales with price: effective cap =
-                                  #   clamp(price * max_width_pct, min_width, max_width)
+    "max_width_pct": 0.03,        # width also scales with price: effective cap =
+                                  #   clamp(price * max_width_pct, min_width, max_width).
+                                  #   Live-tuned 2026-08-06: below ~2.5% too few strikes
+                                  #   fit inside the width to ever clear credit/width;
+                                  #   above ~6% most $80+ names just hit the $5 ceiling
+                                  #   anyway (no different from the flat cap this fixes).
+                                  #   3% keeps names up to ~$167 meaningfully below the
+                                  #   ceiling. NOTE: on a thin-IV day even this can still
+                                  #   leave only 1-2 tickers clearing min_pop as well —
+                                  #   that floor, not width, is what's binding that day.
     "min_width": 1.0,             # floor so very cheap tickers still get a workable width
     "min_pop": 60,                # PoP floor; ~30-delta shorts land ~62-70%
     "min_dte": 35,                # enter far enough out that theta can work BEFORE the
