@@ -151,6 +151,11 @@ def parse_strikes(legs_str):
     return float(parts[0]), float(parts[1])
 
 
+def _option_type_for(trade_type):
+    """Bear Call / Long Call trade calls; Bull Put / Long Put trade puts."""
+    return "call" if trade_type in ("Bear Call", "Long Call") else "put"
+
+
 def build_option_symbol(ticker, expiration, option_type, strike):
     """
     Build OCC option symbol e.g. AMD260417P00190000
@@ -187,24 +192,24 @@ def preview_order(trade, contracts):
     short_strike, long_strike = parse_strikes(trade["legs"])
     expiration = trade["exp_date"]
     ticker = trade["ticker"]
-
-    # Determine option type based on spread type
-    # Bull Put uses puts, Bear Call uses calls
-    is_bear_call = "Bear Call" in trade.get("type", "")
-    opt_type = "call" if is_bear_call else "put"
+    opt_type = _option_type_for(trade.get("type", ""))
 
     short_symbol = build_option_symbol(ticker, expiration, opt_type, short_strike)
     long_symbol  = build_option_symbol(ticker, expiration, opt_type, long_strike)
 
-    # Net credit is what we collect - strip the $ sign
-    credit = float(trade["net_credit"].replace("$", ""))
+    # Debit spreads (Long Call/Long Put) pay a net debit; credit spreads
+    # collect a net credit. Leg sides don't change — long_strike is always the
+    # bought leg (buy_to_open), short_strike the sold leg (sell_to_open) — only
+    # the order's type and price direction differ.
+    is_debit = trade["type"] in ("Long Call", "Long Put")
+    cost = float((trade["net_debit"] if is_debit else trade["net_credit"]).replace("$", ""))
 
     payload = {
         "class":             "multileg",
         "symbol":            ticker,
-        "type":              "credit",
+        "type":              "debit" if is_debit else "credit",
         "duration":          "day",
-        "price":             f"{credit:.2f}",
+        "price":             f"{cost:.2f}",
         "option_symbol[0]":  short_symbol,
         "side[0]":           "sell_to_open",
         "quantity[0]":       str(contracts),
@@ -225,27 +230,26 @@ def preview_order(trade, contracts):
 
 def place_order(trade, contracts):
     """
-    Place a live multileg credit spread order via Tradier.
+    Place a live multileg spread order via Tradier (credit or debit).
     Only called after explicit human approval AND successful preview.
     """
     short_strike, long_strike = parse_strikes(trade["legs"])
     expiration = trade["exp_date"]
     ticker = trade["ticker"]
-
-    # Determine option type based on spread type
-    is_bear_call = "Bear Call" in trade.get("type", "")
-    opt_type = "call" if is_bear_call else "put"
+    opt_type = _option_type_for(trade.get("type", ""))
 
     short_symbol = build_option_symbol(ticker, expiration, opt_type, short_strike)
     long_symbol  = build_option_symbol(ticker, expiration, opt_type, long_strike)
-    credit = float(trade["net_credit"].replace("$", ""))
+
+    is_debit = trade["type"] in ("Long Call", "Long Put")
+    cost = float((trade["net_debit"] if is_debit else trade["net_credit"]).replace("$", ""))
 
     payload = {
         "class":             "multileg",
         "symbol":            ticker,
-        "type":              "credit",
+        "type":              "debit" if is_debit else "credit",
         "duration":          "day",
-        "price":             f"{credit:.2f}",
+        "price":             f"{cost:.2f}",
         "option_symbol[0]":  short_symbol,
         "side[0]":           "sell_to_open",
         "quantity[0]":       str(contracts),
@@ -282,9 +286,18 @@ def save_placed_trade(trade, contracts, order_response):
     Insert placed trade into data/trades.db for the position monitor to track.
     """
     short_strike, long_strike = parse_strikes(trade["legs"])
-    credit   = float(trade["net_credit"].replace("$", ""))
     max_loss = float(trade["max_loss"].replace("$", ""))
-    opt_type = "call" if "Bear Call" in trade.get("type", "") else "put"
+    is_debit = trade["type"] in ("Long Call", "Long Put")
+    opt_type = _option_type_for(trade.get("type", ""))
+
+    if is_debit:
+        debit_paid  = float(trade["net_debit"].replace("$", ""))
+        credit      = 0.0
+        max_profit  = float(trade["max_profit"].replace("$", ""))
+    else:
+        credit      = float(trade["net_credit"].replace("$", ""))
+        debit_paid  = None
+        max_profit  = credit
 
     position = {
         "ticker":            trade["ticker"],
@@ -294,7 +307,8 @@ def save_placed_trade(trade, contracts, order_response):
         "expiration":        trade["exp_date"],
         "dte_at_entry":      trade["dte"],
         "credit_received":   credit,
-        "max_profit":        credit,
+        "debit_paid":        debit_paid,
+        "max_profit":        max_profit,
         "max_loss":          max_loss,
         "contracts":         contracts,
         "short_symbol":      build_option_symbol(
@@ -306,7 +320,10 @@ def save_placed_trade(trade, contracts, order_response):
         "tradier_order_id":  order_response.get("order", {}).get("id", "unknown"),
         "opened_at":         datetime.now().isoformat(),
         "profit_target_pct": 0.40,
-        "stop_loss_pct":     1.50,
+        # stop_loss_pct means "fraction of debit lost before cutting early" for
+        # a debit spread (0.50) vs the vestigial old "1.5x credit" concept for a
+        # credit spread (unused by the monitor, kept at 1.50 for continuity).
+        "stop_loss_pct":     0.50 if is_debit else 1.50,
         "regime":            _read_regime(),
     }
 
@@ -356,39 +373,67 @@ def main():
 
     for trade in actionable:
         short_strike, long_strike = parse_strikes(trade["legs"])
-        credit = float(trade["net_credit"].replace("$", ""))
         max_loss = float(trade["max_loss"].replace("$", ""))
         width = abs(short_strike - long_strike)
-        is_bear_call = "Bear Call" in trade.get("type", "")
-        opt_label = "Call" if is_bear_call else "Put"
+        is_debit = trade["type"] in ("Long Call", "Long Put")
+        opt_label = "Call" if trade["type"] in ("Bear Call", "Long Call") else "Put"
 
         print("=" * 70)
         print(f"  TRADE #{trade['rank']}: {trade['ticker']} {trade['type']}")
         print("=" * 70)
-        print(f"  Sell: {trade['ticker']} {trade['exp_date']} "
-              f"${short_strike:.0f} {opt_label} @ ${credit:.2f} credit")
-        print(f"  Buy:  {trade['ticker']} {trade['exp_date']} "
-              f"${long_strike:.0f} {opt_label}  (protection)")
-        print(f"  ─────────────────────────────────────────────")
-        print(f"  Net Credit:  ${credit:.2f} per contract ($"
-              f"{credit*100:.0f} total)")
-        print(f"  Max Loss:    ${max_loss:.2f} per contract ($"
-              f"{max_loss*100:.0f} total)")
-        print(f"  Max Profit:  ${credit:.2f} per contract ($"
-              f"{credit*100:.0f} total)")
-        print(f"  Width:       ${width:.0f}")
-        print(f"  DTE:         {trade['dte']} days")
-        print(f"  ROI:         {trade['roi']}")
-        print(f"  PoP:         {trade['pop']}")
-        heat = heat_scores.get(trade["ticker"], 'N/A')
-        print(f"  Heat Score:  {heat}/10 (1=safe, 10=risky)")
-        print(f"  Expiration:  {trade['exp_date']}")
-        print(f"  ─────────────────────────────────────────────")
-        print(f"  Profit Target (40%): close when spread = "
-              f"${credit * 0.60:.2f}")
-        print(f"  Stop Loss (1.5x):    close when spread = "
-              f"${credit * 1.5:.2f}")
-        print()
+        if is_debit:
+            cost = float(trade["net_debit"].replace("$", ""))
+            max_profit = float(trade["max_profit"].replace("$", ""))
+            print(f"  Buy:  {trade['ticker']} {trade['exp_date']} "
+                  f"${long_strike:.0f} {opt_label} for ${cost:.2f} debit")
+            print(f"  Sell: {trade['ticker']} {trade['exp_date']} "
+                  f"${short_strike:.0f} {opt_label}  (reduces cost)")
+            print(f"  ─────────────────────────────────────────────")
+            print(f"  Net Debit:   ${cost:.2f} per contract ($"
+                  f"{cost*100:.0f} total)")
+            print(f"  Max Loss:    ${max_loss:.2f} per contract ($"
+                  f"{max_loss*100:.0f} total)")
+            print(f"  Max Profit:  ${max_profit:.2f} per contract ($"
+                  f"{max_profit*100:.0f} total)")
+            print(f"  Breakeven:   {trade.get('breakeven', 'n/a')}")
+            print(f"  Width:       ${width:.0f}")
+            print(f"  DTE:         {trade['dte']} days")
+            print(f"  ROI:         {trade['roi']}")
+            print(f"  PoP:         {trade['pop']}")
+            heat = heat_scores.get(trade["ticker"], 'N/A')
+            print(f"  Heat Score:  {heat}/10 (1=safe, 10=risky)")
+            print(f"  Expiration:  {trade['exp_date']}")
+            print(f"  ─────────────────────────────────────────────")
+            print(f"  Profit target/stop loss are managed by the position "
+                  f"monitor as % of the debit paid (see strategy_params.json)")
+            print()
+            credit = cost  # reused below for the generic contract-sizing/confirm prompts
+        else:
+            credit = float(trade["net_credit"].replace("$", ""))
+            print(f"  Sell: {trade['ticker']} {trade['exp_date']} "
+                  f"${short_strike:.0f} {opt_label} @ ${credit:.2f} credit")
+            print(f"  Buy:  {trade['ticker']} {trade['exp_date']} "
+                  f"${long_strike:.0f} {opt_label}  (protection)")
+            print(f"  ─────────────────────────────────────────────")
+            print(f"  Net Credit:  ${credit:.2f} per contract ($"
+                  f"{credit*100:.0f} total)")
+            print(f"  Max Loss:    ${max_loss:.2f} per contract ($"
+                  f"{max_loss*100:.0f} total)")
+            print(f"  Max Profit:  ${credit:.2f} per contract ($"
+                  f"{credit*100:.0f} total)")
+            print(f"  Width:       ${width:.0f}")
+            print(f"  DTE:         {trade['dte']} days")
+            print(f"  ROI:         {trade['roi']}")
+            print(f"  PoP:         {trade['pop']}")
+            heat = heat_scores.get(trade["ticker"], 'N/A')
+            print(f"  Heat Score:  {heat}/10 (1=safe, 10=risky)")
+            print(f"  Expiration:  {trade['exp_date']}")
+            print(f"  ─────────────────────────────────────────────")
+            print(f"  Profit Target (40%): close when spread = "
+                  f"${credit * 0.60:.2f}")
+            print(f"  Stop Loss (1.5x):    close when spread = "
+                  f"${credit * 1.5:.2f}")
+            print()
 
         # Suggest contract count based on remaining buying power
         margin_per_contract = max_loss * 100
@@ -443,10 +488,11 @@ def main():
 
         # Final approval before placing
         print()
+        cost_label = "debit" if is_debit else "credit"
         confirm = input(
             f"  ⚡ CONFIRM: Place {contracts} contract(s) of "
             f"{trade['ticker']} {trade['legs']} "
-            f"for ${credit*contracts*100:.0f} total credit? "
+            f"for ${credit*contracts*100:.0f} total {cost_label}? "
             f"(yes/no): "
         ).strip().lower()
 

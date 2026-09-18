@@ -49,7 +49,8 @@ _PARAM_DEFAULTS = {
     "min_dte": 35,                # enter far enough out that theta can work BEFORE the
     "max_dte": 45,                #   monitor's 21-DTE time stop (was 21 → trades entered
                                   #   at ~22 DTE and got time-stopped ~1 day later).
-    "enable_iron_condors": True,  # also generate directionally-neutral iron condors
+    "enable_iron_condors": False, # ICs are directionally-neutral; doesn't fit the
+                                  #   dual-signal directional gate below.
     "ic_min_delta": 0.10,         # per-side short delta band for IC legs (lower than a
     "ic_max_delta": 0.25,         #   single vertical — two premiums clear credit/width)
     "ic_min_pop": 50,             # IC between-shorts PoP floor. Lower than a vertical's:
@@ -58,6 +59,20 @@ _PARAM_DEFAULTS = {
     "ic_min_leg_credit_pct": 0.12,# EACH IC leg must clear this credit/width. Prevents a
                                   #   lopsided condor (e.g. a 4%-credit throwaway put +
                                   #   a 30%-credit call = a directional bet, not neutral).
+    # 2026-09-17: credit spreads have a break-even win rate of 1-(credit/width) —
+    # 67% at the 0.33 gate above — and realized losses ran 2-4x realized wins even
+    # at a healthy win rate. Switched default strategy to debit spreads (buy near
+    # the money, sell further OTM same side): loss capped at the debit paid, profit
+    # can be a multiple of it, so a LOWER win rate can be profitable. Credit-spread
+    # code above is kept, not deleted, behind enable_credit_spreads for a one-flag
+    # rollback. See data/strategy_params.json's "_debit_note" for full context.
+    "enable_credit_spreads": False,
+    "enable_debit_spreads": True,
+    "debit_long_delta_min": 0.55,  # long (bought) leg: near-the-money, high delta
+    "debit_long_delta_max": 0.75,
+    "debit_short_delta_min": 0.20, # short (sold) leg: further OTM, reduces cost
+    "debit_short_delta_max": 0.35,
+    "max_debit_to_width": 0.40,    # cap debit at 40% of width -> reward:risk >= 1.5:1
 }
 
 def _load_params() -> dict:
@@ -86,6 +101,143 @@ def black_scholes_pop(stock_price, strike, dte, iv, is_call, delta=None):
         pop = norm.cdf(d2) * 100
 
     return pop
+
+def _load_direction_signals() -> dict:
+    """
+    Merge Claude's news-driven directional call (data/claude_direction.json,
+    from step 00k) with Kronos's price forecast (data/kronos_signals.json,
+    from step 01d). Returns a dict of ONLY the tickers where both signals are
+    non-neutral AND agree -- this is the hard AND-gate: disagreement, or either
+    signal being neutral, means the ticker is simply absent here and no debit
+    spread gets built for it, regardless of how good the options chain looks.
+    """
+    try:
+        with open("data/claude_direction.json") as f:
+            claude_dirs = json.load(f).get("directions", {})
+    except Exception:
+        claude_dirs = {}
+    try:
+        with open("data/kronos_signals.json") as f:
+            kronos_dirs = json.load(f).get("signals", {})
+    except Exception:
+        kronos_dirs = {}
+
+    agreed = {}
+    for ticker, c in claude_dirs.items():
+        c_dir = c.get("direction", "neutral")
+        k = kronos_dirs.get(ticker, {})
+        k_dir = k.get("direction", "neutral")
+        if c_dir in ("bullish", "bearish") and c_dir == k_dir:
+            agreed[ticker] = {
+                "direction": c_dir,
+                "claude_confidence": c.get("confidence"),
+                "kronos_forecast_pct": k.get("forecast_pct"),
+            }
+    return agreed
+
+
+def build_debit_spreads(ticker, direction_info, stock_price, exp_data, params):
+    """
+    Build at most one debit spread per ticker/expiration: buy a near-the-money
+    option, sell a further-OTM option on the SAME side, for a net debit. Loss
+    is capped at the debit paid; max profit = width - debit (a multiple of the
+    debit when max_debit_to_width keeps debit well under the width). Only
+    called for tickers where Claude and Kronos already agree on direction (see
+    _load_direction_signals) -- direction itself is not re-decided here.
+    """
+    direction = direction_info["direction"]
+    is_call   = (direction == "bullish")
+    dte       = exp_data["dte"]
+    MAX_WIDTH = effective_max_width(stock_price, params)
+    LONG_MIN, LONG_MAX   = params["debit_long_delta_min"], params["debit_long_delta_max"]
+    SHORT_MIN, SHORT_MAX = params["debit_short_delta_min"], params["debit_short_delta_max"]
+    MAX_DEBIT_TO_WIDTH   = params["max_debit_to_width"]
+
+    strikes = sorted(exp_data["strikes"], key=lambda s: s["strike"])
+    gk           = "call_greeks" if is_call else "put_greeks"
+    bid_k, ask_k = ("call_bid", "call_ask") if is_call else ("put_bid", "put_ask")
+
+    long_candidates = []
+    for s in strikes:
+        if gk not in s or s.get(ask_k, 0) <= 0:
+            continue
+        d = abs(s[gk]["delta"])
+        if LONG_MIN <= d <= LONG_MAX:
+            long_candidates.append(s)
+    if not long_candidates:
+        return []
+
+    # Search long x short pairs; keep the pair with the HIGHEST PoP (at
+    # breakeven) that still clears the debit/width cap -- mirrors
+    # build_iron_condors' "most conservative structurally-sound pick" approach.
+    best = None
+    for long_strike in long_candidates:
+        scan = ([s for s in strikes if s["strike"] > long_strike["strike"]] if is_call
+                else [s for s in strikes if s["strike"] < long_strike["strike"]])
+        for short_strike in scan:
+            if gk not in short_strike or short_strike.get(bid_k, 0) <= 0:
+                continue
+            sd = abs(short_strike[gk]["delta"])
+            if not (SHORT_MIN <= sd <= SHORT_MAX):
+                continue
+
+            width = (short_strike["strike"] - long_strike["strike"]) if is_call \
+                else (long_strike["strike"] - short_strike["strike"])
+            if width <= 0 or width > MAX_WIDTH:
+                continue
+
+            net_debit = long_strike.get(ask_k, 0) - short_strike.get(bid_k, 0)
+            if net_debit <= 0:
+                continue
+            debit_pct = net_debit / width
+            if debit_pct > MAX_DEBIT_TO_WIDTH:
+                continue
+
+            max_profit = width - net_debit
+            if max_profit <= 0:
+                continue
+
+            breakeven = (long_strike["strike"] + net_debit) if is_call \
+                else (long_strike["strike"] - net_debit)
+            long_iv = long_strike[gk]["iv"]
+            pop = black_scholes_pop(stock_price, breakeven, dte, long_iv, is_call,
+                                     delta=long_strike[gk]["delta"])
+
+            if best is None or pop > best["pop"]:
+                best = {
+                    "long": long_strike, "short": short_strike, "width": width,
+                    "net_debit": net_debit, "debit_pct": debit_pct,
+                    "max_profit": max_profit, "breakeven": breakeven, "pop": pop,
+                    "long_iv": long_iv, "long_delta": long_strike[gk]["delta"],
+                    "short_delta": short_strike[gk]["delta"],
+                }
+
+    if best is None:
+        return []
+
+    roi = (best["max_profit"] / best["net_debit"]) * 100
+
+    return [{
+        "ticker": ticker,
+        "type": "Long Call" if is_call else "Long Put",
+        "stock_price": round(stock_price, 2),
+        "long_strike": best["long"]["strike"],
+        "short_strike": best["short"]["strike"],
+        "width": round(best["width"], 2),
+        "net_debit": round(best["net_debit"], 2),
+        "debit_pct": round(best["debit_pct"] * 100, 1),
+        "max_profit": round(best["max_profit"], 2),
+        "max_loss": round(best["net_debit"], 2),
+        "roi": round(roi, 1),
+        "pop": round(best["pop"], 1),
+        "breakeven": round(best["breakeven"], 2),
+        "long_iv": round(best["long_iv"] * 100, 1),
+        "long_delta": round(best["long_delta"], 2),
+        "short_delta": round(best["short_delta"], 2),
+        "expiration": {"date": exp_data["expiration_date"], "dte": dte},
+        "direction_source": direction_info,
+    }]
+
 
 def effective_max_width(stock_price, params):
     """
@@ -242,12 +394,27 @@ def calculate_spreads():
     MIN_DTE              = params["min_dte"]
     MAX_DTE              = params["max_dte"]
     ENABLE_IC            = params["enable_iron_condors"]
-    print(f"   Params: delta {MIN_DELTA}–{MAX_DELTA} | min_credit ${MIN_CREDIT:.2f} | "
-          f"credit/width ≥ {MIN_CREDIT_TO_WIDTH:.0%} | max_width "
-          f"${params['min_width']:.0f}-${params['max_width']:.0f} "
-          f"(scaled {params['max_width_pct']:.1%} of price) | PoP ≥ {MIN_POP}%")
-    print(f"   Iron condors: {'ON' if ENABLE_IC else 'off'} "
-          f"(per-side delta {params['ic_min_delta']}–{params['ic_max_delta']})")
+    ENABLE_CREDIT        = params.get("enable_credit_spreads", False)
+    ENABLE_DEBIT         = params.get("enable_debit_spreads", True)
+    print(f"   Credit spreads: {'ON' if ENABLE_CREDIT else 'off'} | "
+          f"Debit spreads: {'ON' if ENABLE_DEBIT else 'off'}")
+    if ENABLE_CREDIT:
+        print(f"   Params: delta {MIN_DELTA}–{MAX_DELTA} | min_credit ${MIN_CREDIT:.2f} | "
+              f"credit/width ≥ {MIN_CREDIT_TO_WIDTH:.0%} | max_width "
+              f"${params['min_width']:.0f}-${params['max_width']:.0f} "
+              f"(scaled {params['max_width_pct']:.1%} of price) | PoP ≥ {MIN_POP}%")
+        print(f"   Iron condors: {'ON' if ENABLE_IC else 'off'} "
+              f"(per-side delta {params['ic_min_delta']}–{params['ic_max_delta']})")
+    if ENABLE_DEBIT:
+        agreed_directions = _load_direction_signals()
+        print(f"   Debit params: long delta {params['debit_long_delta_min']}–"
+              f"{params['debit_long_delta_max']} | short delta "
+              f"{params['debit_short_delta_min']}–{params['debit_short_delta_max']} | "
+              f"debit/width ≤ {params['max_debit_to_width']:.0%}")
+        print(f"   Direction gate: {len(agreed_directions)} tickers where Claude + "
+              f"Kronos agree (of the tickers Claude scored)")
+    else:
+        agreed_directions = {}
 
     with open("data/chains_with_greeks.json", "r") as f:
         data = json.load(f)
@@ -302,143 +469,152 @@ def calculate_spreads():
             
             strikes = exp_data["strikes"]
             
-            # Bull Put Spreads
-            for i in range(len(strikes)):
-                for j in range(i):
-                    short_strike = strikes[i]
-                    long_strike = strikes[j]
+            if ENABLE_CREDIT:
+                # Bull Put Spreads
+                for i in range(len(strikes)):
+                    for j in range(i):
+                        short_strike = strikes[i]
+                        long_strike = strikes[j]
                     
-                    if "put_greeks" not in short_strike or "put_greeks" not in long_strike:
-                        continue
+                        if "put_greeks" not in short_strike or "put_greeks" not in long_strike:
+                            continue
                     
-                    short_iv = short_strike["put_greeks"]["iv"]
-                    short_delta = abs(short_strike["put_greeks"]["delta"])
+                        short_iv = short_strike["put_greeks"]["iv"]
+                        short_delta = abs(short_strike["put_greeks"]["delta"])
 
-                    if short_delta < MIN_DELTA or short_delta > MAX_DELTA:
-                        continue
+                        if short_delta < MIN_DELTA or short_delta > MAX_DELTA:
+                            continue
 
-                    short_bid = short_strike.get("put_bid", 0)
-                    long_ask = long_strike.get("put_ask", 0)
+                        short_bid = short_strike.get("put_bid", 0)
+                        long_ask = long_strike.get("put_ask", 0)
 
-                    if short_bid <= 0 or long_ask <= 0:
-                        continue
+                        if short_bid <= 0 or long_ask <= 0:
+                            continue
 
-                    net_credit = short_bid - long_ask
-                    width = short_strike["strike"] - long_strike["strike"]
+                        net_credit = short_bid - long_ask
+                        width = short_strike["strike"] - long_strike["strike"]
 
-                    if net_credit <= 0 or width <= 0:
-                        continue
+                        if net_credit <= 0 or width <= 0:
+                            continue
 
-                    if width > MAX_WIDTH:
-                        continue
+                        if width > MAX_WIDTH:
+                            continue
 
-                    credit_pct = net_credit / width  # stored for display/ranking
-                    if credit_pct < MIN_CREDIT_TO_WIDTH:
-                        continue  # structural EV gate: break-even win rate = 1 - credit/width
-                    if net_credit < MIN_CREDIT:
-                        continue
+                        credit_pct = net_credit / width  # stored for display/ranking
+                        if credit_pct < MIN_CREDIT_TO_WIDTH:
+                            continue  # structural EV gate: break-even win rate = 1 - credit/width
+                        if net_credit < MIN_CREDIT:
+                            continue
 
-                    max_loss = width - net_credit
-                    roi = (net_credit / max_loss) * 100
+                        max_loss = width - net_credit
+                        roi = (net_credit / max_loss) * 100
 
-                    pop = black_scholes_pop(
-                        stock_price,
-                        short_strike["strike"],
-                        dte,
-                        short_iv,
-                        is_call=False,
-                        delta=short_strike["put_greeks"]["delta"]
-                    )
+                        pop = black_scholes_pop(
+                            stock_price,
+                            short_strike["strike"],
+                            dte,
+                            short_iv,
+                            is_call=False,
+                            delta=short_strike["put_greeks"]["delta"]
+                        )
 
-                    if roi >= 5 and roi <= 150 and pop >= MIN_POP:
-                        spread = {
-                            "ticker": ticker,
-                            "type": "Bull Put",
-                            "stock_price": round(stock_price, 2),
-                            "short_strike": short_strike["strike"],
-                            "long_strike": long_strike["strike"],
-                            "width": round(width, 2),
-                            "net_credit": round(net_credit, 2),
-                            "credit_pct": round(credit_pct * 100, 1),
-                            "max_loss": round(max_loss, 2),
-                            "roi": round(roi, 1),
-                            "pop": round(pop, 1),
-                            "short_iv": round(short_iv * 100, 1),
-                            "short_delta": round(short_delta, 2),
-                            "expiration": {"date": exp_data["expiration_date"], "dte": dte}
-                        }
-                        all_spreads.append(spread)
+                        if roi >= 5 and roi <= 150 and pop >= MIN_POP:
+                            spread = {
+                                "ticker": ticker,
+                                "type": "Bull Put",
+                                "stock_price": round(stock_price, 2),
+                                "short_strike": short_strike["strike"],
+                                "long_strike": long_strike["strike"],
+                                "width": round(width, 2),
+                                "net_credit": round(net_credit, 2),
+                                "credit_pct": round(credit_pct * 100, 1),
+                                "max_loss": round(max_loss, 2),
+                                "roi": round(roi, 1),
+                                "pop": round(pop, 1),
+                                "short_iv": round(short_iv * 100, 1),
+                                "short_delta": round(short_delta, 2),
+                                "expiration": {"date": exp_data["expiration_date"], "dte": dte}
+                            }
+                            all_spreads.append(spread)
             
-            # Bear Call Spreads
-            for i in range(len(strikes)):
-                for j in range(i + 1, len(strikes)):
-                    short_strike = strikes[i]
-                    long_strike = strikes[j]
+                # Bear Call Spreads
+                for i in range(len(strikes)):
+                    for j in range(i + 1, len(strikes)):
+                        short_strike = strikes[i]
+                        long_strike = strikes[j]
                     
-                    if "call_greeks" not in short_strike or "call_greeks" not in long_strike:
-                        continue
+                        if "call_greeks" not in short_strike or "call_greeks" not in long_strike:
+                            continue
                     
-                    short_iv = short_strike["call_greeks"]["iv"]
-                    short_delta = abs(short_strike["call_greeks"]["delta"])
+                        short_iv = short_strike["call_greeks"]["iv"]
+                        short_delta = abs(short_strike["call_greeks"]["delta"])
 
-                    if short_delta < MIN_DELTA or short_delta > MAX_DELTA:
-                        continue
+                        if short_delta < MIN_DELTA or short_delta > MAX_DELTA:
+                            continue
 
-                    short_bid = short_strike.get("call_bid", 0)
-                    long_ask = long_strike.get("call_ask", 0)
+                        short_bid = short_strike.get("call_bid", 0)
+                        long_ask = long_strike.get("call_ask", 0)
 
-                    if short_bid <= 0 or long_ask <= 0:
-                        continue
+                        if short_bid <= 0 or long_ask <= 0:
+                            continue
 
-                    net_credit = short_bid - long_ask
-                    width = long_strike["strike"] - short_strike["strike"]
+                        net_credit = short_bid - long_ask
+                        width = long_strike["strike"] - short_strike["strike"]
 
-                    if net_credit <= 0 or width <= 0:
-                        continue
+                        if net_credit <= 0 or width <= 0:
+                            continue
 
-                    if width > MAX_WIDTH:
-                        continue
+                        if width > MAX_WIDTH:
+                            continue
 
-                    credit_pct = net_credit / width  # stored for display/ranking
-                    if credit_pct < MIN_CREDIT_TO_WIDTH:
-                        continue  # structural EV gate: break-even win rate = 1 - credit/width
-                    if net_credit < MIN_CREDIT:
-                        continue
+                        credit_pct = net_credit / width  # stored for display/ranking
+                        if credit_pct < MIN_CREDIT_TO_WIDTH:
+                            continue  # structural EV gate: break-even win rate = 1 - credit/width
+                        if net_credit < MIN_CREDIT:
+                            continue
 
-                    max_loss = width - net_credit
-                    roi = (net_credit / max_loss) * 100
+                        max_loss = width - net_credit
+                        roi = (net_credit / max_loss) * 100
 
-                    pop = black_scholes_pop(
-                        stock_price,
-                        short_strike["strike"],
-                        dte,
-                        short_iv,
-                        is_call=True,
-                        delta=short_strike["call_greeks"]["delta"]
-                    )
+                        pop = black_scholes_pop(
+                            stock_price,
+                            short_strike["strike"],
+                            dte,
+                            short_iv,
+                            is_call=True,
+                            delta=short_strike["call_greeks"]["delta"]
+                        )
 
-                    if roi >= 5 and roi <= 150 and pop >= MIN_POP:
-                        spread = {
-                            "ticker": ticker,
-                            "type": "Bear Call",
-                            "stock_price": round(stock_price, 2),
-                            "short_strike": short_strike["strike"],
-                            "long_strike": long_strike["strike"],
-                            "width": round(width, 2),
-                            "net_credit": round(net_credit, 2),
-                            "credit_pct": round(credit_pct * 100, 1),
-                            "max_loss": round(max_loss, 2),
-                            "roi": round(roi, 1),
-                            "pop": round(pop, 1),
-                            "short_iv": round(short_iv * 100, 1),
-                            "short_delta": round(short_delta, 2),
-                            "expiration": {"date": exp_data["expiration_date"], "dte": dte}
-                        }
-                        all_spreads.append(spread)
+                        if roi >= 5 and roi <= 150 and pop >= MIN_POP:
+                            spread = {
+                                "ticker": ticker,
+                                "type": "Bear Call",
+                                "stock_price": round(stock_price, 2),
+                                "short_strike": short_strike["strike"],
+                                "long_strike": long_strike["strike"],
+                                "width": round(width, 2),
+                                "net_credit": round(net_credit, 2),
+                                "credit_pct": round(credit_pct * 100, 1),
+                                "max_loss": round(max_loss, 2),
+                                "roi": round(roi, 1),
+                                "pop": round(pop, 1),
+                                "short_iv": round(short_iv * 100, 1),
+                                "short_delta": round(short_delta, 2),
+                                "expiration": {"date": exp_data["expiration_date"], "dte": dte}
+                            }
+                            all_spreads.append(spread)
 
-            # Iron Condors — one neutral candidate per ticker/expiration
-            if ENABLE_IC:
-                all_spreads.extend(build_iron_condors(ticker, stock_price, exp_data, params))
+                # Iron Condors — one neutral candidate per ticker/expiration
+                if ENABLE_IC:
+                    all_spreads.extend(build_iron_condors(ticker, stock_price, exp_data, params))
+
+            # Debit spread — only for tickers where Claude + Kronos already
+            # agreed on a direction (see _load_direction_signals). Direction
+            # picks calls vs puts; nothing else here is direction-dependent.
+            if ENABLE_DEBIT and ticker in agreed_directions:
+                all_spreads.extend(build_debit_spreads(
+                    ticker, agreed_directions[ticker], stock_price, exp_data, params
+                ))
 
         ticker_spreads = len([s for s in all_spreads if s["ticker"] == ticker])
         print(f"   ✅ {ticker_spreads} quality spreads")
@@ -455,6 +631,9 @@ def calculate_spreads():
     print(f"\n✅ Total spreads: {len(all_spreads)}")
     print(f"   Bull Puts: {len([s for s in all_spreads if s['type'] == 'Bull Put'])}")
     print(f"   Bear Calls: {len([s for s in all_spreads if s['type'] == 'Bear Call'])}")
+    print(f"   Iron Condors: {len([s for s in all_spreads if s['type'] == 'Iron Condor'])}")
+    print(f"   Long Calls: {len([s for s in all_spreads if s['type'] == 'Long Call'])}")
+    print(f"   Long Puts: {len([s for s in all_spreads if s['type'] == 'Long Put'])}")
 
 if __name__ == "__main__":
     calculate_spreads()

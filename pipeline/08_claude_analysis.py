@@ -65,9 +65,19 @@ def load_comprehensive_data():
             strikes = trade["legs"].replace("$", "").split("/")
             trade["short_strike"] = float(strikes[0])
             trade["long_strike"] = float(strikes[1])
+            is_debit = trade["type"] in ("Long Call", "Long Put")
             if "current_price" in trade:
                 current = trade["current_price"]
-                if "Put" in trade["type"]:
+                if is_debit and trade.get("breakeven"):
+                    # For a debit spread, "buffer" is distance to breakeven, not to
+                    # the short strike — positive means the underlying already
+                    # clears breakeven, negative means it still needs to move.
+                    breakeven = float(str(trade["breakeven"]).replace("$", ""))
+                    if trade["type"] == "Long Call":
+                        trade["buffer_pct"] = (current - breakeven) / current * 100
+                    else:
+                        trade["buffer_pct"] = (breakeven - current) / current * 100
+                elif "Put" in trade["type"]:
                     trade["buffer_pct"] = (current - trade["short_strike"]) / current * 100
                 else:
                     trade["buffer_pct"] = (trade["short_strike"] - current) / current * 100
@@ -111,6 +121,10 @@ Indicators: {ind_line}
 {pref_line}
 A Bull Put in a Contraction/Stagflation regime carries extra downside tail risk.
 A Bear Call in a Goldilocks regime fights upward drift — require extra buffer.
+A Long Call needs the underlying to actually CLEAR breakeven before expiration —
+a regime that doesn't support upward moves works directly against it, not just
+against a short strike being breached. A Long Put needs the underlying to fall
+below breakeven; a regime with upward drift works against it the same way.
 Factor the macro regime into your RECOMMENDATION for each trade.
 
 """
@@ -166,6 +180,10 @@ TRADES WITH NEWS:
             "SKIP":  "🔴 Quant engine says SKIP — did NOT clear entry/watch thresholds. Presented for completeness only."
         }.get(quant_decision, "")
 
+        is_debit = trade["type"] in ("Long Call", "Long Put")
+        strike_line = (f"Breakeven: {trade.get('breakeven', 'n/a')}" if is_debit
+                       else f"Short Strike: ${trade['short_strike']:.0f}")
+
         prompt += f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TRADE #{i}: {ticker} {trade['type']} {trade['legs']}
@@ -174,7 +192,7 @@ QUANT DECISION: {quant_decision}  |  Quant Score: {quant_score:.1f}
 {dec_context}
 
 METRICS:
-- Current: ${current:.2f} | Short Strike: ${trade['short_strike']:.0f} | Buffer: {buffer:.1f}%
+- Current: ${current:.2f} | {strike_line} | Buffer: {buffer:.1f}%
 - DTE: {dte} | ROI: {roi:.1f}% | PoP: {pop:.1f}%
 - Sector: {sector} | IV vs peers: z={iv_z_str} | 20d return vs peers: z={ret_z_str}
 - Sector peers in today's universe: {peer_str}

@@ -70,6 +70,7 @@ def main():
         ("00E", "pipeline/00e_select_22_tradier.py",        "Score & select top 22"),
         ("00F", "pipeline/00f_get_news_tradier.py",         "Fetch news headlines"),
         ("00G", "pipeline/00g_claude_sentiment_filter.py",  "Claude sentiment filter"),
+        ("00K", "pipeline/00k_claude_direction.py",         "Claude directional call (bullish/bearish)"),
         ("00H", "pipeline/00h_macro_regime.py",             "Macro regime classification"),
         ("00I", "pipeline/00i_fetch_ohlcv.py",              "Fetch OHLCV history"),
         ("01",  "pipeline/01_get_prices_tradier.py",        "Get real-time prices"),

@@ -54,7 +54,14 @@ def _load_strategy_params() -> dict:
     # every surviving spread already has ROI >= ~50%, so PoP is the real ENTER/WATCH
     # discriminator. ~30-delta shorts land PoP ~62-70%, so floors sit at 60-65 (NOT
     # the old 72-76 "high win rate" floors, which structurally forced thin credit).
-    defaults = {"enter_pop": 65, "enter_roi": 40, "watch_pop": 60, "watch_roi": 33}
+    defaults = {
+        "enter_pop": 65, "enter_roi": 40, "watch_pop": 60, "watch_roi": 33,
+        # Separate thresholds for debit spreads (Long Call/Long Put) — a
+        # directional bet's raw PoP is structurally lower than a premium-seller's,
+        # so the credit-spread floors above would reject every debit spread.
+        "debit_enter_pop": 40, "debit_enter_roi": 60,
+        "debit_watch_pop": 35, "debit_watch_roi": 40,
+    }
     try:
         with open(_PARAMS_FILE) as f:
             p = json.load(f)
@@ -165,10 +172,12 @@ def rank_spreads():
         data = json.load(f)
     spreads = data["spreads"]
 
-    regime      = load_macro_regime()
-    tech_map    = load_technicals()
-    peer_map    = load_peer_zscores()
+    regime          = load_macro_regime()
+    tech_map        = load_technicals()
+    peer_map        = load_peer_zscores()
     kronos_map, kronos_installed = load_kronos_signals()
+    strategy_params = _load_strategy_params()
+    DEBIT_TYPES     = ("Long Call", "Long Put")
 
     print(f"\n🌍 Macro Regime: {regime['regime_label']}")
     if regime["preferred_type"]:
@@ -195,7 +204,8 @@ def rank_spreads():
         # PoP-primary base score: higher PoP always wins vs lower PoP at same ROI
         base_score = pop * (1 + roi / 100)
 
-        is_ic = spread_type == "Iron Condor"
+        is_ic    = spread_type == "Iron Condor"
+        is_debit = spread_type in DEBIT_TYPES
         kronos_ticker = kronos_map.get(ticker, {})
 
         if is_ic:
@@ -203,19 +213,25 @@ def rank_spreads():
             regime_mult = tech_mult = peer_mult = kronos_mult = 1.0
             signal = "neutral"
         else:
-            # Regime multiplier
-            regime_mult = (regime["bull_put_multiplier"] if spread_type == "Bull Put"
+            # Regime/technical multipliers express "how bullish/bearish-favorable is
+            # this backdrop" — a Long Call wants the same tilt as a Bull Put (benefits
+            # from bullishness), a Long Put the same as a Bear Call.
+            tilt_key = "Bull Put" if spread_type in ("Bull Put", "Long Call") else "Bear Call"
+            regime_mult = (regime["bull_put_multiplier"] if tilt_key == "Bull Put"
                            else regime["bear_call_multiplier"])
-            # Technical multiplier
             signal    = tech_map.get(ticker, "neutral")
-            tech_mult = _TECH_MULTIPLIERS.get(signal, _TECH_MULTIPLIERS["neutral"])[spread_type]
-            # Peer z-score multiplier
+            tech_mult = _TECH_MULTIPLIERS.get(signal, _TECH_MULTIPLIERS["neutral"])[tilt_key]
             peer_mult = peer_map.get(ticker, 1.0)
-            # Kronos AI multiplier — DEMOTED: clamped to a narrow ranking tilt (was ±20%).
-            # It nudges ranking; it no longer vetoes a structurally-sound trade (block removed below).
-            raw_k = (kronos_ticker.get("bull_put", 1.0) if spread_type == "Bull Put"
-                     else kronos_ticker.get("bear_call", 1.0))
-            kronos_mult = min(max(raw_k, _KRONOS_CLAMP_LO), _KRONOS_CLAMP_HI)
+            if is_debit:
+                # Direction was already a hard Claude+Kronos AND-gate in step 05 —
+                # Kronos doesn't get a second, softer bite as a ranking multiplier.
+                kronos_mult = 1.0
+            else:
+                # Kronos AI multiplier — DEMOTED: clamped to a narrow ranking tilt (was ±20%).
+                # It nudges ranking; it no longer vetoes a structurally-sound trade (block removed below).
+                raw_k = (kronos_ticker.get("bull_put", 1.0) if spread_type == "Bull Put"
+                         else kronos_ticker.get("bear_call", 1.0))
+                kronos_mult = min(max(raw_k, _KRONOS_CLAMP_LO), _KRONOS_CLAMP_HI)
 
         spread["score"]             = round(base_score * regime_mult * tech_mult * peer_mult * kronos_mult, 1)
         spread["regime_multiplier"] = regime_mult
@@ -242,6 +258,18 @@ def rank_spreads():
         elif regime.get("block_bull_puts") and spread_type == "Bull Put":
             spread["decision"] = "SKIP"
             spread["skip_reason"] = "VIX shock — Bull Put entries blocked"
+        elif is_debit:
+            # Debit thresholds come straight from strategy_params.json, not the
+            # macro-regime-adjusted credit thresholds — those were tuned for a
+            # premium-selling PoP profile and don't apply here.
+            if (spread["pop"] >= strategy_params["debit_enter_pop"]
+                    and spread["roi"] >= strategy_params["debit_enter_roi"]):
+                spread["decision"] = "ENTER"
+            elif (spread["pop"] >= strategy_params["debit_watch_pop"]
+                    and spread["roi"] >= strategy_params["debit_watch_roi"]):
+                spread["decision"] = "WATCH"
+            else:
+                spread["decision"] = "SKIP"
         elif spread["pop"] >= regime["enter_pop"] and spread["roi"] >= regime["enter_roi"]:
             spread["decision"] = "ENTER"
         elif spread["pop"] >= regime["watch_pop"] and spread["roi"] >= regime["watch_roi"]:

@@ -39,12 +39,17 @@ def build_report_table():
     
     for spread in spreads:
         ticker = spread["ticker"]
+        is_debit = spread["type"] in ("Long Call", "Long Put")
 
         ic = spread.get("ic")
         if spread["type"] == "Iron Condor" and ic:
             legs = (f"P${ic['short_put']:.0f}/${ic['long_put']:.0f} "
                     f"C${ic['short_call']:.0f}/${ic['long_call']:.0f}")
         else:
+            # Keep the "$short/$long" position convention for every type (short =
+            # sold leg, long = bought leg) so downstream parsers that split on "/"
+            # (08_claude_analysis.py, 11_place_trades.py) don't need to know which
+            # strategy built the trade.
             legs = f"${spread['short_strike']:.0f}/${spread['long_strike']:.0f}"
 
         entry = {
@@ -57,12 +62,19 @@ def build_report_table():
             "dte": spread["expiration"]["dte"],
             "roi": f"{spread['roi']}%",
             "pop": f"{spread['pop']}%",
-            "net_credit": f"${spread['net_credit']:.2f}",
+            # debit spreads pay a net_debit (cost), credit spreads collect a
+            # net_credit — only one of these is populated per trade.
+            "net_credit": f"${spread['net_credit']:.2f}" if not is_debit else None,
+            "net_debit": f"${spread['net_debit']:.2f}" if is_debit else None,
+            "breakeven": f"${spread['breakeven']:.2f}" if is_debit else None,
+            # for credit spreads max_profit == net_credit (not duplicated here);
+            # for debit spreads max_profit = width - debit, a real separate figure
+            "max_profit": f"${spread['max_profit']:.2f}" if is_debit else None,
             "max_loss": f"${spread['max_loss']:.2f}",
             "decision": spread["decision"],
             "edge_reason": EDGE_REASON.get(ticker, ""),
-            "iv": spread["short_iv"],
-            "delta": spread["short_delta"],
+            "iv": spread.get("long_iv", spread.get("short_iv", 0.0)),
+            "delta": spread.get("long_delta", spread.get("short_delta", 0.0)),
             "score": spread["score"],
             "kronos_direction": spread.get("kronos_direction", "n/a"),
             "kronos_forecast_pct": spread.get("kronos_forecast_pct", 0.0),

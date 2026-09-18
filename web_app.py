@@ -353,11 +353,16 @@ async def _alert_monitor_loop():
             for pos in positions:
                 if pos.get("alert_sent"):
                     continue
-                current_value = get_spread_value(pos["short_symbol"], pos["long_symbol"])
+                is_debit = pos["type"] in ("Long Call", "Long Put")
+                current_value = get_spread_value(
+                    pos["short_symbol"], pos["long_symbol"], is_debit=is_debit)
                 if current_value is None:
                     continue
-                credit = pos["credit_received"]
-                profit_pct = round((credit - current_value) / credit * 100, 1)
+                cost_basis = pos["debit_paid"] if is_debit else pos["credit_received"]
+                if is_debit:
+                    profit_pct = round((current_value - cost_basis) / cost_basis * 100, 1)
+                else:
+                    profit_pct = round((cost_basis - current_value) / cost_basis * 100, 1)
                 if profit_pct >= 40.0:
                     _send_alert_email(pos["ticker"], "Profit Target Hit", profit_pct)
                     db.mark_alert_sent(pos["id"])
@@ -369,6 +374,11 @@ async def _alert_monitor_loop():
         await asyncio.sleep(60)
 
 
+def _option_type_for(trade_type):
+    """Bear Call / Long Call trade calls; Bull Put / Long Put trade puts."""
+    return "call" if trade_type in ("Bear Call", "Long Call") else "put"
+
+
 def _order_payload(trade, contracts, preview=False):
     if trade.get("type") == "Iron Condor":
         raise ValueError(
@@ -376,17 +386,17 @@ def _order_payload(trade, contracts, preview=False):
             "paper verticals by the auto-trader. Keep PAPER_TRADING=1 for iron condors."
         )
     short_strike, long_strike = parse_strikes(trade["legs"])
-    is_bear_call = "Bear Call" in trade.get("type", "")
-    opt_type = "call" if is_bear_call else "put"
-    credit = float(trade["net_credit"].replace("$", ""))
+    opt_type = _option_type_for(trade.get("type", ""))
+    is_debit = trade["type"] in ("Long Call", "Long Put")
+    cost = float((trade["net_debit"] if is_debit else trade["net_credit"]).replace("$", ""))
     ticker = trade["ticker"]
     expiration = trade["exp_date"]
     return {
         "class": "multileg",
         "symbol": ticker,
-        "type": "credit",
+        "type": "debit" if is_debit else "credit",
         "duration": "day",
-        "price": f"{credit:.2f}",
+        "price": f"{cost:.2f}",
         "option_symbol[0]": build_option_symbol(ticker, expiration, opt_type, short_strike),
         "side[0]": "sell_to_open",
         "quantity[0]": str(contracts),
@@ -461,9 +471,17 @@ def save_placed_trade(trade, contracts, order_response, status: str = "pending")
         return first_id
 
     short_strike, long_strike = parse_strikes(trade["legs"])
-    credit = float(trade["net_credit"].replace("$", ""))
     max_loss = float(trade["max_loss"].replace("$", ""))
-    opt_type = "call" if "Bear Call" in trade.get("type", "") else "put"
+    opt_type = _option_type_for(trade.get("type", ""))
+    is_debit = trade["type"] in ("Long Call", "Long Put")
+    if is_debit:
+        debit_paid = float(trade["net_debit"].replace("$", ""))
+        credit     = 0.0
+        max_profit = float(trade["max_profit"].replace("$", ""))
+    else:
+        credit     = float(trade["net_credit"].replace("$", ""))
+        debit_paid = None
+        max_profit = credit
     return db.insert_open_trade({
         "ticker": ticker,
         "type": trade["type"],
@@ -472,7 +490,8 @@ def save_placed_trade(trade, contracts, order_response, status: str = "pending")
         "expiration": expiration,
         "dte_at_entry": trade["dte"],
         "credit_received": credit,
-        "max_profit": credit,
+        "debit_paid": debit_paid,
+        "max_profit": max_profit,
         "max_loss": max_loss,
         "contracts": contracts,
         "short_symbol": build_option_symbol(ticker, expiration, opt_type, short_strike),
@@ -480,12 +499,19 @@ def save_placed_trade(trade, contracts, order_response, status: str = "pending")
         "tradier_order_id": order_response.get("order", {}).get("id", "unknown"),
         "opened_at": datetime.now().isoformat(),
         "profit_target_pct": 0.50,
-        "stop_loss_pct": 1.50,
+        "stop_loss_pct": 0.50 if is_debit else 1.50,
         "regime": _read_regime(),
     }, status=status)
 
 
-def get_spread_value(short_symbol, long_symbol):
+def get_spread_value(short_symbol, long_symbol, max_value=None, is_debit=False):
+    """
+    "short"/"long" always mean sold/bought. Credit spread: value = cost to
+    close (short_ask - long_bid), decaying toward 0 is favorable. Debit
+    spread: value = proceeds from closing (long_bid - short_ask), rising
+    toward the width is favorable. See pipeline/12_position_monitor.py's
+    version of this function for the full explanation.
+    """
     try:
         r = _session.get(
             f"{TRADIER_BASE_URL}/markets/quotes",
@@ -510,7 +536,12 @@ def get_spread_value(short_symbol, long_symbol):
         long_bid  = best(qmap.get(long_symbol, {}), "bid")
         if short_ask <= 0 and long_bid <= 0:
             return None
-        return round(short_ask - long_bid, 2)
+        value = round((long_bid - short_ask) if is_debit else (short_ask - long_bid), 2)
+        if max_value is not None and value > max_value:
+            value = max_value
+        if value < 0:
+            value = 0.0
+        return value
     except Exception:
         return None
 
@@ -519,10 +550,11 @@ def close_position(position, current_value):
     if not current_value or current_value <= 0:
         raise ValueError("Cannot place closing order without a valid market price")
     contracts = position["contracts"]
+    is_debit = position["type"] in ("Long Call", "Long Put")
     payload = {
         "class": "multileg",
         "symbol": position["ticker"],
-        "type": "debit",
+        "type": "credit" if is_debit else "debit",
         "duration": "day",
         "price": f"{round(current_value, 2):.2f}",
         "option_symbol[0]": position["short_symbol"],
@@ -602,10 +634,18 @@ async def api_trades(request: Request):
         rec = recommendations.get(ticker, "UNKNOWN")
         heat = heat_scores.get(ticker)
         short_strike, long_strike = _trade_strikes(t)
-        credit = float(t["net_credit"].replace("$", ""))
+        is_debit = t["type"] in ("Long Call", "Long Put")
+        cost = float((t["net_debit"] if is_debit else t["net_credit"]).replace("$", ""))
         max_loss = float(t["max_loss"].replace("$", ""))
         r = rationale.get(ticker, {})
-        result.append({
+        width = abs(long_strike - short_strike)
+        if is_debit:
+            profit_target = round(cost + 0.50 * (width - cost), 2)
+            stop_loss     = round(cost * 0.50, 2)
+        else:
+            profit_target = round(cost * 0.60, 2)
+            stop_loss     = round(cost * 1.5, 2)
+        entry = {
             "rank": t["rank"],
             "ticker": ticker,
             "type": t["type"],
@@ -614,15 +654,17 @@ async def api_trades(request: Request):
             "long_strike": long_strike,
             "exp_date": t["exp_date"],
             "dte": t["dte"],
-            "net_credit": credit,
+            "net_credit": None if is_debit else cost,
+            "net_debit": cost if is_debit else None,
+            "breakeven": t.get("breakeven"),
             "max_loss": max_loss,
             "roi": t["roi"],
             "pop": t["pop"],
             "recommendation": rec,
             "heat": heat,
             "suggested_contracts": suggest_contracts(max_loss, obp) if obp else 1,
-            "profit_target": round(credit * 0.60, 2),
-            "stop_loss": round(credit * 1.5, 2),
+            "profit_target": profit_target,
+            "stop_loss": stop_loss,
             "rationale": {
                 "what": r.get("what", ""),
                 "how": r.get("how", ""),
@@ -630,7 +672,8 @@ async def api_trades(request: Request):
                 "catalyst": r.get("catalyst", ""),
                 "reason": r.get("reason", ""),
             },
-        })
+        }
+        result.append(entry)
     return {"trades": result, "buying_power": obp, "last_run": _last_run_info()}
 
 
@@ -699,13 +742,26 @@ async def api_positions(request: Request):
     result = []
     for pos in positions:
         dte = (date.fromisoformat(pos["expiration"]) - today).days
-        current_value = get_spread_value(pos["short_symbol"], pos["long_symbol"])
-        credit = pos["credit_received"]
+        is_debit = pos["type"] in ("Long Call", "Long Put")
+        current_value = get_spread_value(
+            pos["short_symbol"], pos["long_symbol"], is_debit=is_debit)
+        cost_basis = pos["debit_paid"] if is_debit else pos["credit_received"]
+        width = abs(pos["short_strike"] - pos["long_strike"])
         profit_pct = None
         total_profit = None
         if current_value is not None:
-            profit_pct = round((credit - current_value) / credit * 100, 1)
-            total_profit = round((credit - current_value) * pos["contracts"] * 100, 2)
+            if is_debit:
+                profit_pct = round((current_value - cost_basis) / cost_basis * 100, 1)
+                total_profit = round((current_value - cost_basis) * pos["contracts"] * 100, 2)
+            else:
+                profit_pct = round((cost_basis - current_value) / cost_basis * 100, 1)
+                total_profit = round((cost_basis - current_value) * pos["contracts"] * 100, 2)
+        if is_debit:
+            profit_target = round(cost_basis + 0.50 * (width - cost_basis), 2)
+            stop_loss     = round(cost_basis * 0.50, 2)
+        else:
+            profit_target = round(cost_basis * 0.60, 2)
+            stop_loss     = round(cost_basis * 1.5, 2)
         result.append({
             "id": pos["id"],
             "ticker": pos["ticker"],
@@ -714,13 +770,14 @@ async def api_positions(request: Request):
             "long_strike": pos["long_strike"],
             "expiration": pos["expiration"],
             "dte": dte,
-            "credit_received": credit,
+            "credit_received": None if is_debit else cost_basis,
+            "debit_paid": cost_basis if is_debit else None,
             "contracts": pos["contracts"],
             "current_value": current_value,
             "profit_pct": profit_pct,
             "total_profit": total_profit,
-            "profit_target": round(credit * 0.60, 2),
-            "stop_loss": round(credit * 1.5, 2),
+            "profit_target": profit_target,
+            "stop_loss": stop_loss,
             "opened_at": pos.get("opened_at"),
             "regime": pos.get("regime"),
             "status": pos.get("status", "open"),
@@ -784,7 +841,9 @@ async def api_close(request: Request, position_id: int):
     if not pos:
         raise HTTPException(404, f"Position {position_id} not found or already closing")
 
-    current_value = get_spread_value(pos["short_symbol"], pos["long_symbol"])
+    is_debit = pos["type"] in ("Long Call", "Long Put")
+    current_value = get_spread_value(
+        pos["short_symbol"], pos["long_symbol"], is_debit=is_debit)
     if current_value is None:
         raise HTTPException(503, "Could not fetch live price — try again")
 
@@ -792,15 +851,21 @@ async def api_close(request: Request, position_id: int):
     # (close_position() always posts a real broker order, which the live account
     # rejects for a paper position — that was the "refused to close" failure.)
     if PAPER_TRADING:
-        credit    = pos["credit_received"]
-        contracts = pos["contracts"]
-        profit     = round((credit - current_value) * contracts * 100, 2)
-        profit_pct = round((credit - current_value) / credit * 100, 1) if credit else 0
+        cost_basis = pos["debit_paid"] if is_debit else pos["credit_received"]
+        contracts  = pos["contracts"]
+        if is_debit:
+            profit     = round((current_value - cost_basis) * contracts * 100, 2)
+            profit_pct = round((current_value - cost_basis) / cost_basis * 100, 1) if cost_basis else 0
+            per_contract = round((current_value - cost_basis) * 100, 2)
+        else:
+            profit     = round((cost_basis - current_value) * contracts * 100, 2)
+            profit_pct = round((cost_basis - current_value) / cost_basis * 100, 1) if cost_basis else 0
+            per_contract = round((cost_basis - current_value) * 100, 2)
         db.close_trade(
             trade_id=pos["id"],
             close_reason="manual_close",
             close_value=current_value,
-            profit_per_contract=round((credit - current_value) * 100, 2),
+            profit_per_contract=per_contract,
             total_profit=profit,
             profit_pct=profit_pct,
             close_order_id=f"PAPER-CLOSE-{pos['ticker']}-{int(datetime.now().timestamp())}",
@@ -848,19 +913,26 @@ async def api_positions_sync(request: Request):
                 actions.append({"id": pos["id"], "ticker": pos["ticker"], "action": "removed", "order_status": tradier_status})
 
         elif pos["status"] == "closing":
-            credit = pos["credit_received"]
+            is_debit = pos["type"] in ("Long Call", "Long Put")
+            cost_basis = pos["debit_paid"] if is_debit else pos["credit_received"]
             contracts = pos["contracts"]
             close_value = pos.get("close_value") or 0
             if filled:
                 # Use the actual fill price if available, else fall back to submitted price
                 fill_price = float(order.get("avg_fill_price") or close_value)
-                profit = round((credit - fill_price) * contracts * 100, 2)
-                profit_pct = round((credit - fill_price) / credit * 100, 1) if credit else 0
+                if is_debit:
+                    profit = round((fill_price - cost_basis) * contracts * 100, 2)
+                    profit_pct = round((fill_price - cost_basis) / cost_basis * 100, 1) if cost_basis else 0
+                    per_contract = round((fill_price - cost_basis) * 100, 2)
+                else:
+                    profit = round((cost_basis - fill_price) * contracts * 100, 2)
+                    profit_pct = round((cost_basis - fill_price) / cost_basis * 100, 1) if cost_basis else 0
+                    per_contract = round((cost_basis - fill_price) * 100, 2)
                 db.close_trade(
                     trade_id=pos["id"],
                     close_reason=pos.get("close_reason") or "manual_close",
                     close_value=fill_price,
-                    profit_per_contract=round((credit - fill_price) * 100, 2),
+                    profit_per_contract=per_contract,
                     total_profit=profit,
                     profit_pct=profit_pct,
                     close_order_id=str(order_id),
@@ -918,7 +990,8 @@ async def api_portfolio(request: Request):
             "long_strike": t["long_strike"],
             "expiration": t["expiration"],
             "contracts": t["contracts"],
-            "credit_received": t["credit_received"],
+            "credit_received": t["credit_received"] or None,
+            "debit_paid": t.get("debit_paid"),
             "close_value": t.get("close_value"),
             "total_profit": t.get("total_profit"),
             "profit_pct": t.get("profit_pct"),
@@ -1392,9 +1465,10 @@ let _closeId = null, _closeData = null;
 function openCloseModal(id, data) {
   _closeId = id; _closeData = data;
   const pc = data.profit_pct >= 0 ? 'green' : 'red';
+  const isDebit = data.debit_paid != null;
   document.getElementById('modal-body').innerHTML = `
     <div class="drow"><span>${data.ticker} ${data.type}</span><span class="v">$${data.short_strike}/$${data.long_strike}</span></div>
-    <div class="drow"><span>Credit Received</span><span class="v">${fmt(data.credit_received)}</span></div>
+    <div class="drow"><span>${isDebit ? 'Debit Paid' : 'Credit Received'}</span><span class="v">${fmt(isDebit ? data.debit_paid : data.credit_received)}</span></div>
     <div class="drow"><span>Current Value</span><span class="v">${fmt(data.current_value)}</span></div>
     <div class="drow"><span>P&L</span><span class="v ${pc}">${fmt(data.total_profit)} (${fmtPct(data.profit_pct)})</span></div>
     <div class="drow"><span>Contracts</span><span class="v">${data.contracts}</span></div>`;
@@ -1886,7 +1960,8 @@ function renderTrades() {
     html += `<div class="section-hdr">Claude Recommendations — ${tradeable.length} Trade(s)</div>`;
     for (const t of tradeable) {
       const res = _results[t.ticker];
-      const tc = t.type.includes('Bull') ? 'badge-bull' : 'badge-bear';
+      const isDebit = t.type === 'Long Call' || t.type === 'Long Put';
+      const tc = (t.type.includes('Bull') || t.type === 'Long Call') ? 'badge-bull' : 'badge-bear';
       const done = !!res;
       html += `
       <div class="card" id="card-${t.ticker}">
@@ -1898,7 +1973,7 @@ function renderTrades() {
         </div>
         <div class="card-body">
           <div class="grid2">
-            <div class="stat"><div class="lbl">Net Credit / Contract</div><div class="val green">${fmt(t.net_credit * 100)}</div></div>
+            <div class="stat"><div class="lbl">${isDebit ? 'Net Debit' : 'Net Credit'} / Contract</div><div class="val ${isDebit ? 'red' : 'green'}">${fmt((isDebit ? t.net_debit : t.net_credit) * 100)}</div></div>
             <div class="stat"><div class="lbl">Max Loss / Contract</div><div class="val red">${fmt(t.max_loss * 100)}</div></div>
             <div class="stat"><div class="lbl">ROI</div><div class="val">${t.roi}</div></div>
             <div class="stat"><div class="lbl">PoP</div><div class="val">${t.pop}</div></div>
@@ -1908,8 +1983,8 @@ function renderTrades() {
             <div class="stat"><div class="lbl">Expiry</div><div class="val">${t.exp_date} (${t.dte}d)</div></div>
           </div>
           <div class="exit-row">
-            <div class="exit-item"><div class="lbl">Profit Target (40%)</div><div class="val green">${fmt(t.profit_target * 100)}</div></div>
-            <div class="exit-item"><div class="lbl">Stop Loss (1.5x)</div><div class="val red">${fmt(t.stop_loss * 100)}</div></div>
+            <div class="exit-item"><div class="lbl">Profit Target</div><div class="val green">${fmt(t.profit_target * 100)}</div></div>
+            <div class="exit-item"><div class="lbl">Stop Loss</div><div class="val red">${fmt(t.stop_loss * 100)}</div></div>
           </div>
           ${renderAnalystNote(t.rationale)}
           ${done ? '' : `
@@ -1934,7 +2009,8 @@ function renderTrades() {
   if (others.length) {
     html += `<div class="section-hdr">Other Candidates</div>`;
     for (const t of others) {
-      const tc = t.type.includes('Bull') ? 'badge-bull' : 'badge-bear';
+      const isDebitOther = t.type === 'Long Call' || t.type === 'Long Put';
+      const tc = (t.type.includes('Bull') || t.type === 'Long Call') ? 'badge-bull' : 'badge-bear';
       const rc = `badge-${t.recommendation}`;
       html += `
       <div class="card">
@@ -1945,7 +2021,7 @@ function renderTrades() {
         </div>
         <div class="card-body">
           <div class="grid2">
-            <div class="stat"><div class="lbl">Net Credit / Contract</div><div class="val">${fmt(t.net_credit * 100)}</div></div>
+            <div class="stat"><div class="lbl">${isDebitOther ? 'Net Debit' : 'Net Credit'} / Contract</div><div class="val">${fmt((isDebitOther ? t.net_debit : t.net_credit) * 100)}</div></div>
             <div class="stat"><div class="lbl">Max Loss / Contract</div><div class="val">${fmt(t.max_loss * 100)}</div></div>
             <div class="stat"><div class="lbl">ROI</div><div class="val">${t.roi}</div></div>
             <div class="stat"><div class="lbl">PoP</div><div class="val">${t.pop}</div></div>
@@ -2089,7 +2165,7 @@ function renderPositions(list) {
   const closing = list.filter(p => p.status === 'closing');
   let html = `<div class="section-hdr">Positions (${list.length})</div><div class="positions-grid">`;
   for (const p of list) {
-    const tc = p.type.includes('Bull') ? 'badge-bull' : 'badge-bear';
+    const tc = (p.type.includes('Bull') || p.type === 'Long Call') ? 'badge-bull' : 'badge-bear';
     const pct = p.profit_pct;
     const barColor = pct == null ? 'var(--muted)' : pct >= 0 ? 'var(--green)' : 'var(--red)';
     const barWidth = pct == null ? 0 : Math.min(100, Math.abs(pct));
@@ -2125,7 +2201,7 @@ function renderPositions(list) {
           <div class="price-chart-inner"><canvas id="chart-${p.id}"></canvas></div>
         </div>
         <div class="grid2">
-          <div class="stat"><div class="lbl">Credit</div><div class="val green">${fmt(p.credit_received)}</div></div>
+          <div class="stat"><div class="lbl">${p.debit_paid != null ? 'Debit' : 'Credit'}</div><div class="val ${p.debit_paid != null ? 'red' : 'green'}">${fmt(p.debit_paid != null ? p.debit_paid : p.credit_received)}</div></div>
           <div class="stat"><div class="lbl">Current Value</div><div class="val">${p.current_value != null ? fmt(p.current_value) : '<span class="spin"></span>'}</div></div>
           <div class="stat">
             <div class="lbl">P&L</div>

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS trades (
     expiration          TEXT    NOT NULL,
     dte_at_entry        INTEGER NOT NULL,
     credit_received     REAL    NOT NULL,
+    debit_paid          REAL,
     max_profit          REAL    NOT NULL,
     max_loss            REAL    NOT NULL,
     contracts           INTEGER NOT NULL,
@@ -55,6 +56,11 @@ _MIGRATIONS = [
     # Links the two vertical rows of an iron condor (same value on put + call leg).
     # NULL for standalone verticals.
     "ALTER TABLE trades ADD COLUMN group_id TEXT",
+    # Cost basis for a long debit spread (Long Call / Long Put). NULL for
+    # credit-spread rows, which use credit_received instead. Kept as a
+    # separate column rather than a signed credit_received so downstream
+    # code must explicitly branch on trade type instead of relying on sign.
+    "ALTER TABLE trades ADD COLUMN debit_paid REAL",
 ]
 
 
@@ -89,18 +95,20 @@ def insert_open_trade(position: dict, status: str = "open") -> int:
         """
         INSERT INTO trades (
             ticker, type, short_strike, long_strike, expiration,
-            dte_at_entry, credit_received, max_profit, max_loss,
+            dte_at_entry, credit_received, debit_paid, max_profit, max_loss,
             contracts, short_symbol, long_symbol, tradier_order_id,
             opened_at, profit_target_pct, stop_loss_pct, regime, status, group_id
         ) VALUES (
             :ticker, :type, :short_strike, :long_strike, :expiration,
-            :dte_at_entry, :credit_received, :max_profit, :max_loss,
+            :dte_at_entry, :credit_received, :debit_paid, :max_profit, :max_loss,
             :contracts, :short_symbol, :long_symbol, :tradier_order_id,
             :opened_at, :profit_target_pct, :stop_loss_pct, :regime, :status, :group_id
         )
         """,
         {**position, "regime": position.get("regime"),
-         "status": status, "group_id": position.get("group_id")},
+         "status": status, "group_id": position.get("group_id"),
+         "credit_received": position.get("credit_received") or 0.0,
+         "debit_paid": position.get("debit_paid")},
     )
     conn.commit()
     row_id = cur.lastrowid

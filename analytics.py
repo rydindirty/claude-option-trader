@@ -66,8 +66,10 @@ def _recent_table(trades, n=20):
         pnl = _pnl(t["total_profit"] or 0)
         regime = t.get("regime") or "—"
         close_v = f"${t['close_value']:.2f}" if t["close_value"] else "open"
+        is_debit = t["type"] in ("Long Call", "Long Put")
+        cost_basis = t.get("debit_paid") if is_debit else t["credit_received"]
         print(f"  {date:<12} {t['ticker']:<6} {t['type']:<10} {strikes:<10} "
-              f"{t['dte_at_entry']:>4}  ${t['credit_received']:.2f}  "
+              f"{t['dte_at_entry']:>4}  ${cost_basis:.2f}  "
               f"{close_v:>7}  {pnl:>8}  {regime:<12} {t['close_reason'] or ''}")
 
 
@@ -113,7 +115,14 @@ def run(include_sandbox=False, recent_only=False):
     total_pnl = sum(t["total_profit"] or 0 for t in trades)
     avg_pnl = total_pnl / len(trades)
     avg_dte = sum(t["dte_at_entry"] for t in trades) / len(trades)
-    avg_credit = sum(t["credit_received"] for t in trades) / len(trades)
+    # credit_received is 0.0 (not the real cost) on debit-spread rows -- only
+    # average it over actual credit-spread trades so debit rows don't drag it down.
+    credit_trades = [t for t in trades if t["type"] not in ("Long Call", "Long Put")]
+    avg_credit = (sum(t["credit_received"] for t in credit_trades) / len(credit_trades)
+                  if credit_trades else 0.0)
+    debit_trades = [t for t in trades if t["type"] in ("Long Call", "Long Put")]
+    avg_debit = (sum(t["debit_paid"] or 0 for t in debit_trades) / len(debit_trades)
+                 if debit_trades else 0.0)
 
     best  = max(trades, key=lambda t: t["total_profit"] or 0)
     worst = min(trades, key=lambda t: t["total_profit"] or 0)
@@ -131,7 +140,10 @@ def run(include_sandbox=False, recent_only=False):
     print(f"  Best trade:            {_pnl(best['total_profit'] or 0):>8}  {best_lbl}")
     print(f"  Worst trade:           {_pnl(worst['total_profit'] or 0):>8}  {worst_lbl}")
     print(f"  Avg DTE at entry:      {avg_dte:.1f}")
-    print(f"  Avg credit collected:  ${avg_credit:.2f}")
+    if credit_trades:
+        print(f"  Avg credit collected:  ${avg_credit:.2f}  ({len(credit_trades)} credit trades)")
+    if debit_trades:
+        print(f"  Avg debit paid:        ${avg_debit:.2f}  ({len(debit_trades)} debit trades)")
 
     # ── Breakdowns ────────────────────────────────────────────────
     _breakdown(trades, lambda t: t["type"],         "BY SPREAD TYPE")

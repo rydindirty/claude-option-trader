@@ -185,10 +185,16 @@ def _nearest(m, target, after=True):
 
 
 def load_closed(db_path):
+    # This backtest reconstructs credit-spread economics (short/long verticals
+    # sold for a credit) -- it doesn't model debit-spread payoff, so those rows
+    # are excluded here rather than silently mis-backtested. See project memory
+    # for the 2026-09 switch to debit spreads.
     c = sqlite3.connect(db_path); c.row_factory = sqlite3.Row
     rows = c.execute("""SELECT id,ticker,type,short_strike,long_strike,expiration,
                         opened_at,credit_received,contracts,close_reason,total_profit
-                        FROM trades WHERE status='closed' ORDER BY opened_at""").fetchall()
+                        FROM trades WHERE status='closed'
+                        AND type NOT IN ('Long Call','Long Put')
+                        ORDER BY opened_at""").fetchall()
     c.close()
     return [dict(r) for r in rows]
 

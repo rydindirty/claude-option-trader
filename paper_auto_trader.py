@@ -296,14 +296,28 @@ def _open_position_directions() -> dict:
     return counts
 
 
+def _option_type_for(trade_type: str) -> str:
+    """Bear Call / Long Call trade calls; Bull Put / Long Put trade puts."""
+    return "call" if trade_type in ("Bear Call", "Long Call") else "put"
+
+
 def _place_paper_trade(trade: dict, contracts: int, reason: str) -> int:
     """Insert a paper auto trade into the DB and return the row id."""
     short_strike, long_strike = _parse_strikes(trade["legs"])
-    credit = float(trade["net_credit"].replace("$", ""))
     max_loss = float(trade["max_loss"].replace("$", ""))
-    opt_type = "call" if "Bear Call" in trade.get("type", "") else "put"
+    opt_type = _option_type_for(trade.get("type", ""))
     ticker, expiration = trade["ticker"], trade["exp_date"]
     order_id = f"PAPER-AUTO-{ticker}-{int(datetime.now().timestamp())}"
+
+    is_debit = trade["type"] in ("Long Call", "Long Put")
+    if is_debit:
+        debit_paid = float(trade["net_debit"].replace("$", ""))
+        credit     = 0.0
+        max_profit = float(trade["max_profit"].replace("$", ""))
+    else:
+        credit     = float(trade["net_credit"].replace("$", ""))
+        debit_paid = None
+        max_profit = credit
 
     regime = None
     try:
@@ -320,7 +334,8 @@ def _place_paper_trade(trade: dict, contracts: int, reason: str) -> int:
         "expiration": expiration,
         "dte_at_entry": trade["dte"],
         "credit_received": credit,
-        "max_profit": credit,
+        "debit_paid": debit_paid,
+        "max_profit": max_profit,
         "max_loss": max_loss,
         "contracts": contracts,
         "short_symbol": _build_option_symbol(ticker, expiration, opt_type, short_strike),
@@ -328,7 +343,10 @@ def _place_paper_trade(trade: dict, contracts: int, reason: str) -> int:
         "tradier_order_id": order_id,
         "opened_at": datetime.now().isoformat(),
         "profit_target_pct": 0.50,
-        "stop_loss_pct": 1.50,
+        # stop_loss_pct means "fraction of debit lost before cutting early" for
+        # a debit spread (0.50) vs the vestigial old "1.5x credit" concept for a
+        # credit spread (unused by the monitor, kept at 1.50 for continuity).
+        "stop_loss_pct": 0.50 if is_debit else 1.50,
         "regime": regime,
     }, status="open")
 
@@ -529,9 +547,11 @@ def main():
             direction_counts["Bear Call"] = direction_counts.get("Bear Call", 0) + 1
         else:
             row_id = _place_paper_trade(trade, contracts=1, reason=reason)
+            is_debit = trade["type"] in ("Long Call", "Long Put")
+            cost_label = f"debit={trade['net_debit']}" if is_debit else f"credit={trade['net_credit']}"
             _log(
                 f"  ENTER {ticker} {trade['type']} {trade['legs']} "
-                f"x1 credit={trade['net_credit']} max_loss=${max_loss:.2f} "
+                f"x1 {cost_label} max_loss=${max_loss:.2f} "
                 f"sector={trade.get('sector', '?')} | DB#{row_id}"
             )
             # Count this direction so the same-side cap holds within this run too
