@@ -72,7 +72,23 @@ _PARAM_DEFAULTS = {
     "debit_long_delta_max": 0.75,
     "debit_short_delta_min": 0.20, # short (sold) leg: further OTM, reduces cost
     "debit_short_delta_max": 0.35,
-    "max_debit_to_width": 0.40,    # cap debit at 40% of width -> reward:risk >= 1.5:1
+    "max_debit_to_width": 0.50,    # cap debit at 50% of width -> reward:risk >= 1:1.
+                                   #   Live-tuned 2026-09-21: the CREDIT-spread width
+                                   #   cap (a few % of price, tuned for tight verticals)
+                                   #   is far too narrow for the debit delta gap above --
+                                   #   a 0.55-0.75 delta long vs a 0.20-0.35 delta short
+                                   #   naturally needs a MUCH wider strike separation
+                                   #   (12-20%+ of price on real chains). Separate
+                                   #   debit_max_width_pct below fixes that; 0.40 (the
+                                   #   original guess) rejected nearly every real
+                                   #   candidate because the market-clearing debit/width
+                                   #   for this delta pairing runs ~40-50%, not ~30%.
+    "debit_max_width_pct": 0.25,   # debit spreads need much wider strikes than a tight
+                                   #   credit vertical -- scales with price like
+                                   #   max_width_pct does for credit spreads, just larger.
+    "debit_min_width": 5.0,
+    "debit_max_width": 60.0,       # absolute ceiling so a high-price name doesn't get an
+                                   #   unbounded (and unboundedly risky) width.
 }
 
 def _load_params() -> dict:
@@ -136,6 +152,17 @@ def _load_direction_signals() -> dict:
     return agreed
 
 
+def effective_debit_max_width(stock_price, params):
+    """
+    Per-ticker width cap for DEBIT spreads -- same clamp shape as
+    effective_max_width() but with its own (much larger) parameters, since the
+    debit delta gap (long ~0.55-0.75 vs short ~0.20-0.35) needs strikes spread
+    much further apart than a tight credit vertical does.
+    """
+    pct_width = stock_price * params["debit_max_width_pct"]
+    return round(min(params["debit_max_width"], max(params["debit_min_width"], pct_width)), 2)
+
+
 def build_debit_spreads(ticker, direction_info, stock_price, exp_data, params):
     """
     Build at most one debit spread per ticker/expiration: buy a near-the-money
@@ -148,7 +175,7 @@ def build_debit_spreads(ticker, direction_info, stock_price, exp_data, params):
     direction = direction_info["direction"]
     is_call   = (direction == "bullish")
     dte       = exp_data["dte"]
-    MAX_WIDTH = effective_max_width(stock_price, params)
+    MAX_WIDTH = effective_debit_max_width(stock_price, params)
     LONG_MIN, LONG_MAX   = params["debit_long_delta_min"], params["debit_long_delta_max"]
     SHORT_MIN, SHORT_MAX = params["debit_short_delta_min"], params["debit_short_delta_max"]
     MAX_DEBIT_TO_WIDTH   = params["max_debit_to_width"]
@@ -410,7 +437,9 @@ def calculate_spreads():
         print(f"   Debit params: long delta {params['debit_long_delta_min']}–"
               f"{params['debit_long_delta_max']} | short delta "
               f"{params['debit_short_delta_min']}–{params['debit_short_delta_max']} | "
-              f"debit/width ≤ {params['max_debit_to_width']:.0%}")
+              f"debit/width ≤ {params['max_debit_to_width']:.0%} | max_width "
+              f"${params['debit_min_width']:.0f}-${params['debit_max_width']:.0f} "
+              f"(scaled {params['debit_max_width_pct']:.0%} of price)")
         print(f"   Direction gate: {len(agreed_directions)} tickers where Claude + "
               f"Kronos agree (of the tickers Claude scored)")
     else:
