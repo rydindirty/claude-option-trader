@@ -204,12 +204,20 @@ def _paper_balance() -> dict:
     ).fetchall()
     realized = sum(r["total_profit"] or 0.0 for r in closed)
 
-    # Reserved capital: max loss locked in open paper trades
+    # Reserved capital: max loss locked in open paper trades. max_loss is a
+    # PER-SHARE dollar amount (e.g. $15.90) -- an options contract is 100
+    # shares, so real dollar risk is max_loss * contracts * 100. This *100 was
+    # missing here (a pre-existing bug) and in the entry-gate check below;
+    # it stayed invisible while credit-spread widths were capped at $1-5/share
+    # (bounding real risk to $100-500 by accident), but debit spreads need much
+    # wider legs ($24-60+/share), which exposed it as a real oversizing bug —
+    # see project memory for the 2026-09-21 incident (two positions placed
+    # with $1,170-$1,590 real risk against an $1,131 account).
     open_rows = conn.execute(
         "SELECT max_loss, contracts FROM trades "
         "WHERE status IN ('open','pending','closing') AND tradier_order_id LIKE 'PAPER-AUTO-%'"
     ).fetchall()
-    reserved = sum(r["max_loss"] * r["contracts"] for r in open_rows)
+    reserved = sum(r["max_loss"] * r["contracts"] * 100 for r in open_rows)
     open_count = len(open_rows)
     conn.close()
 
@@ -410,11 +418,22 @@ def _place_iron_condor(trade: dict, contracts: int, reason: str) -> list:
 
 
 # ─── main ─────────────────────────────────────────────────────────────────────
+PAUSE_FILE = DATA_DIR / "AUTO_TRADER_PAUSED"
+
+
 def main():
     force = "--force" in sys.argv
 
     _log("=" * 60)
     _log("PAPER AUTO TRADER — starting")
+
+    # 0. Explicit pause switch (delete the file to resume). Added 2026-09-21
+    # after a debit-spread position-sizing bug let two oversized trades through
+    # ($1,170/$1,590 real risk on an ~$1,131 account) -- gives a hard, visible
+    # off switch independent of code review while sizing is being verified.
+    if PAUSE_FILE.exists() and not force:
+        _log(f"PAUSED — {PAUSE_FILE} exists (delete it, or use --force, to resume)")
+        sys.exit(0)
 
     # 1. Require paper trading mode (safety gate)
     paper_mode = os.getenv("PAPER_TRADING", "0").strip().lower() in ("1", "true", "yes")
@@ -487,7 +506,10 @@ def main():
         quant = t.get("decision", "")
         claude = recs.get(ticker, "")
         heat_score = heat.get(ticker, 0)
-        max_loss_per_contract = float(t["max_loss"].replace("$", ""))
+        # max_loss is a per-share dollar amount; a contract is 100 shares, so
+        # this must be *100 to compare against a real dollar risk_limit (see
+        # the note on the *100 fix in _paper_balance() above).
+        max_loss_per_contract = float(t["max_loss"].replace("$", "")) * 100
         risk_limit = bal["available"] * MAX_RISK_PCT
         trade_sector = t.get("sector", "Unknown")
 
